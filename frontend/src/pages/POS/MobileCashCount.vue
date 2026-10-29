@@ -1,0 +1,55 @@
+<template>
+  <div class="flex flex-col gap-3">
+    <div
+      class="grid grid-cols-[minmax(0,1fr)_8.5rem_6.5rem] gap-2 border-b border-outline-gray-1 pb-1.5 text-xs-medium text-ink-gray-5"
+    >
+      <span>{{ heading }}</span>
+      <span class="text-center">{{ t`Count` }}</span>
+      <span class="text-end">{{ t`Amount` }}</span>
+    </div>
+    <div
+      v-for="row in rows"
+      :key="row.idx"
+      class="grid grid-cols-[minmax(0,1fr)_8.5rem_6.5rem] items-center gap-2 text-md tabular-nums text-ink-gray-8"
+    >
+      <span class="truncate" dir="ltr">{{ format(row.denomination) }}</span>
+      <NumberStepper
+        :value="row.count ?? 0"
+        :df="{
+          fieldname: 'count',
+          fieldtype: 'Int',
+          label: t`Count of ${format(row.denomination)}`,
+        }"
+        @change="(count: number) => setCount(row, count)"
+      />
+      <span class="truncate text-end" dir="ltr">
+        {{ format(row.denomination?.mul(row.count ?? 0)) }}
+      </span>
+    </div>
+    <p v-if="!rows.length" class="text-p-sm text-ink-gray-6">
+      {{ t`Set Cash Denominations in Settings to count cash here.` }}
+    </p>
+    <p v-else-if="note" class="text-p-sm text-ink-gray-5">{{ note }}</p>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { t } from 'fyo';
+import { CashCountRow } from 'models/inventory/Point of Sale/POSOpeningEntry';
+import { Money } from 'pesa';
+import NumberStepper from 'src/components/POS/NumberStepper.vue';
+import { fyo } from 'src/initFyo';
+
+/** Cash counted by denomination, with a stepper per note; `note` says what is kept of it. */
+defineProps<{ heading: string; rows: CashCountRow[]; note?: string }>();
+const emit = defineEmits<{ change: [] }>();
+
+function format(amount?: Money): string {
+  return fyo.format(amount ?? fyo.pesa(0), 'Currency');
+}
+
+async function setCount(row: CashCountRow, count: number) {
+  await row.set('count', Math.max(count, 0));
+  emit('change');
+}
+</script>

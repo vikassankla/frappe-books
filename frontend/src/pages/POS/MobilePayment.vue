@@ -1,0 +1,274 @@
+<template>
+  <div class="flex flex-1 flex-col">
+    <div
+      class="flex flex-col items-center gap-1.5 border-b border-outline-gray-1 px-4 pb-5 pt-6 text-center"
+    >
+      <span class="text-sm text-ink-gray-5">
+        {{ sinvDoc.isReturn ? t`Amount to refund` : t`Amount due` }}
+      </span>
+      <span class="text-7xl-semibold tabular-nums text-ink-gray-9" dir="ltr">
+        {{ format(posCheckout.due) }}
+      </span>
+      <span class="text-sm text-ink-gray-5">{{ summary }}</span>
+      <dl
+        v-if="costLines.length > 1"
+        class="mt-3 flex w-full flex-col gap-1.5 text-sm tabular-nums text-ink-gray-6"
+      >
+        <div
+          v-for="line in costLines"
+          :key="line.label"
+          class="flex justify-between gap-4"
+        >
+          <dt class="min-w-0 text-start">{{ line.label }}</dt>
+          <dd class="shrink-0" dir="ltr">{{ format(line.value) }}</dd>
+        </div>
+      </dl>
+    </div>
+
+    <section class="flex flex-col gap-4 p-4">
+      <div
+        v-for="(tender, index) in posCheckout.tenders"
+        :key="index"
+        class="flex flex-col gap-4"
+        :class="{ 'border-t border-outline-gray-1 pt-4': index }"
+      >
+        <div class="flex flex-col gap-1.5">
+          <div class="flex items-center justify-between gap-2">
+            <span :id="`${labelId}-${index}`" class="text-sm text-ink-gray-6">
+              {{ getTenderLabel(index) }}
+            </span>
+            <FrappeButton
+              v-if="isSplit"
+              icon="lucide-x"
+              variant="ghost"
+              :aria-label="t`Remove ${getTenderLabel(index)}`"
+              @click="posCheckout.removeTender(index)"
+            />
+          </div>
+          <!-- 48px tiles: RadioGroup rows stop at 32px (frappe/frappe-ui#1257). -->
+          <div
+            role="radiogroup"
+            class="grid grid-cols-2 gap-2"
+            :aria-labelledby="`${labelId}-${index}`"
+          >
+            <button
+              v-for="method in posCheckout.getMethods(index)"
+              :key="method.name"
+              type="button"
+              role="radio"
+              class="flex h-12 min-w-0 items-center gap-2.5 rounded-5 border px-3 text-start text-md-medium"
+              :class="
+                method.name === tender.mode_of_payment
+                  ? 'border-outline-gray-4 bg-surface-base text-ink-gray-9 shadow-sm'
+                  : 'border-outline-gray-2 text-ink-gray-7'
+              "
+              :aria-checked="method.name === tender.mode_of_payment"
+              @click="posCheckout.selectMethod(index, method.name)"
+            >
+              <FrappeIcon
+                :icon="paymentMethodIcons[method.type ?? 'Cash']"
+                class="size-5 shrink-0"
+              />
+              <span class="min-w-0 flex-1 truncate">{{ method.name }}</span>
+              <FrappeIcon
+                v-if="method.name === tender.mode_of_payment"
+                icon="lucide-circle-check"
+                class="size-4 shrink-0 text-ink-gray-9"
+              />
+            </button>
+          </div>
+        </div>
+
+        <Data
+          v-if="posCheckout.getRequirements(index).requiresReferenceId"
+          :df="getField('PaymentEntry', 'reference_no')!"
+          :show-label="true"
+          :border="true"
+          :required="true"
+          :read-only="false"
+          :value="tender.reference_no"
+          @change="
+            (reference: string) => posCheckout.setReference(index, reference)
+          "
+        />
+        <DateControl
+          v-if="posCheckout.getRequirements(index).requiresClearanceDate"
+          :df="getField('PaymentEntry', 'clearance_date')!"
+          :show-label="true"
+          :border="true"
+          :required="true"
+          :read-only="false"
+          :value="tender.clearance_date"
+          @change="(date: Date) => posCheckout.setClearanceDate(index, date)"
+        />
+
+        <Currency
+          :df="{
+            ...getField('PaymentEntryReference', 'allocated_amount')!,
+            label: sinvDoc.isReturn ? t`Refund amount` : t`Amount paid`,
+          }"
+          :show-label="true"
+          :read-only="false"
+          :border="true"
+          :value="tender.amount"
+          @change="
+            (amount: Money | null) => posCheckout.setAmount(index, amount)
+          "
+        />
+        <div
+          v-if="posCheckout.getQuickAmounts(index).length"
+          class="flex flex-wrap gap-2"
+        >
+          <FrappeButton
+            v-for="amount in posCheckout.getQuickAmounts(index)"
+            :key="amount.float"
+            size="lg"
+            :variant="amount.eq(tender.amount) ? 'subtle' : 'outline'"
+            :aria-pressed="amount.eq(tender.amount)"
+            :label="
+              amount.eq(posCheckout.getRest(index)) ? t`Exact` : format(amount)
+            "
+            @click="posCheckout.setAmount(index, amount)"
+          />
+        </div>
+      </div>
+
+      <FrappeButton
+        v-if="posCheckout.canAddTender"
+        class="self-start"
+        icon-left="lucide-plus"
+        size="lg"
+        variant="ghost"
+        :label="t`Add payment`"
+        @click="posCheckout.addTender"
+      />
+      <div
+        v-if="posCheckout.settlement"
+        class="flex justify-between gap-4 py-1 text-lg-semibold tabular-nums text-ink-gray-8"
+        role="status"
+      >
+        <span>{{ posCheckout.settlement.label }}</span>
+        <span dir="ltr">{{ format(posCheckout.settlement.amount) }}</span>
+      </div>
+    </section>
+
+    <section
+      v-if="showLoyalty || showCoupon"
+      class="border-t border-outline-gray-1"
+    >
+      <FrappeSwitch
+        v-if="showLoyalty"
+        class="border-b border-outline-gray-1 px-4 py-3"
+        icon="lucide-gift"
+        size="md"
+        :label="t`Redeem loyalty points`"
+        :description="t`${sinvDoc.availableLoyaltyPoints} points available`"
+        :model-value="!!sinvDoc.redeem_loyalty_points"
+        @update:model-value="(on: boolean) => $emit('setLoyalty', on)"
+      />
+      <!-- A 56px row: ItemListRow stops at 40px (frappe/frappe-ui#1250). -->
+      <button
+        v-if="showCoupon"
+        type="button"
+        class="flex h-14 w-full items-center gap-3 border-b border-outline-gray-1 px-4 text-start text-lg text-ink-gray-8"
+        @click="$emit('applyCoupon')"
+      >
+        <FrappeIcon
+          icon="lucide-ticket-percent"
+          class="size-5 text-ink-gray-5"
+        />
+        <span class="flex-1">{{ t`Apply coupon code` }}</span>
+        <span v-if="appliedCouponsCount" class="text-base text-ink-gray-5">
+          {{ appliedCouponsCount }}
+        </span>
+        <FrappeIcon
+          icon="lucide-chevron-right"
+          class="size-4 text-ink-gray-4 rtl-rotate-180"
+        />
+      </button>
+    </section>
+
+    <MobileFooter class="flex-col">
+      <FrappeButton
+        size="lg"
+        variant="solid"
+        :disabled="!posCheckout.canPay"
+        :label="sinvDoc.isReturn ? t`Refund` : t`Pay`"
+        @click="$emit('pay')"
+      />
+      <div class="flex gap-2">
+        <FrappeButton
+          class="flex-1"
+          size="lg"
+          :disabled="!posCheckout.canPay"
+          :label="sinvDoc.isReturn ? t`Refund & print` : t`Pay & print`"
+          @click="$emit('payAndPrint')"
+        />
+        <FrappeButton
+          v-if="!sinvDoc.isSubmitted"
+          class="flex-1"
+          size="lg"
+          :label="t`Submit only`"
+          @click="$emit('submit')"
+        />
+      </div>
+    </MobileFooter>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { t } from 'fyo';
+import {
+  Button as FrappeButton,
+  Icon as FrappeIcon,
+  Switch as FrappeSwitch,
+} from 'frappe-ui';
+import type { SalesInvoice } from 'models/invoices/SalesInvoice';
+import { Money } from 'pesa';
+import Currency from 'src/components/Controls/Currency.vue';
+import Data from 'src/components/Controls/Data.vue';
+import DateControl from 'src/components/Controls/Date.vue';
+import { paymentMethodIcons } from 'src/components/POS/types';
+import { getField } from 'src/frappe/registry';
+import { fyo } from 'src/initFyo';
+import MobileFooter from 'src/mobile/MobileFooter.vue';
+import { getCostLines, getTotalQuantity } from 'src/utils/pos';
+import { posCheckoutKey } from 'src/utils/posCheckout';
+import { isCouponOffered, isLoyaltyOffered } from 'src/utils/posDiscounts';
+import { computed, inject, useId, type Ref } from 'vue';
+
+/** The phone payment screen, inside PaymentModal; the POS checkout owns its tender. */
+defineProps<{ appliedCouponsCount: number }>();
+
+defineEmits<{
+  setLoyalty: [on: boolean];
+  applyCoupon: [];
+  pay: [];
+  payAndPrint: [];
+  submit: [];
+}>();
+
+const sinvDoc = inject('sinvDoc') as Ref<SalesInvoice>;
+const posCheckout = inject(posCheckoutKey)!;
+
+const labelId = useId();
+const isSplit = computed(() => posCheckout.tenders.length > 1);
+// A split payment names each tender, as the desktop dialog does.
+const getTenderLabel = (index: number) =>
+  isSplit.value ? t`Payment ${index + 1}` : t`Payment method`;
+const showLoyalty = computed(() => isLoyaltyOffered(sinvDoc.value));
+const showCoupon = computed(() => isCouponOffered(sinvDoc.value));
+
+const summary = computed(() => {
+  const quantity = getTotalQuantity(sinvDoc.value.items ?? []);
+  const items = quantity === 1 ? t`1 item` : t`${quantity} items`;
+  return [sinvDoc.value.customer, items].filter(Boolean).join(' · ');
+});
+
+// Only Net Total means nothing changed it, so the amount due says it all.
+const costLines = computed(() => getCostLines(sinvDoc.value));
+
+function format(amount: Money): string {
+  return fyo.format(amount, 'Currency');
+}
+</script>

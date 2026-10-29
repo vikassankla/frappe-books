@@ -1,0 +1,190 @@
+import type { DocValueMap } from 'fyo/core/types';
+import { NotFoundError } from 'fyo/utils/errors';
+import { getIsNullOrUndef } from 'utils';
+import { fyo } from 'src/initFyo';
+import { call } from 'src/web/api';
+import type { DocValues } from './api';
+import type { FrappeDoc } from './document';
+import { getDocType } from './doctypes';
+import { isAccessoryMode } from './mode';
+import { getNamingField } from './schema';
+import { toDocValues } from './values';
+
+/** Open Frappe documents by schema and name, so a form, a quick edit and a link share one. */
+const docs = new Map<string, FrappeDoc>();
+
+/**
+ * An unsaved document with its defaults and `values`, kept until it is saved
+ * or dropped. A name given for a document named by a field goes in that field.
+ */
+export function newFrappeDoc(
+  schemaName: string,
+  values: DocValueMap = {}
+): FrappeDoc {
+  const { Model, schema, meta } = getDocType(schemaName);
+  const namingField = getNamingField(meta);
+  if (namingField && values.name) {
+    values = { ...values, [namingField]: values.name };
+  }
+
+  const doc = new Model(schema, values, fyo) as FrappeDoc;
+  doc.name ??= fyo.getTemporaryName(schema);
+  doc.leaveToServer(
+    Model.serverDefaults.filter((fieldname) => !(fieldname in values))
+  );
+  keep(doc);
+  return doc;
+}
+
+/**
+ * What the source DocType's server `mapper`, like an invoice's make_payment,
+ * builds from its document `sourceName`; in accessory mode, the ERPNext
+ * mapper the server names for it.
+ */
+export async function getMappedValues(
+  sourceSchemaName: string,
+  sourceName: string,
+  mapper: string
+): Promise<DocValues> {
+  if (isAccessoryMode()) {
+    return await call<DocValues>(
+      'frappe_books.accessory.mappers.make_mapped_doc',
+      {
+        source_doctype: getDocType(sourceSchemaName).doctype,
+        source_name: sourceName,
+        mapper,
+      }
+    );
+  }
+
+  return await call<DocValues>('frappe.model.mapper.make_mapped_doc', {
+    method: `${getControllerModule(sourceSchemaName)}.${mapper}`,
+    source_name: sourceName,
+  });
+}
+
+/** The unsaved `schemaName` document that the server `mapper` of `source`, like make_return, builds from it. */
+export async function getMappedDoc(
+  source: FrappeDoc,
+  schemaName: string,
+  mapper: string
+): Promise<FrappeDoc> {
+  const mapped = await getMappedValues(source.schemaName, source.name!, mapper);
+  const values = toDocValues(
+    getDocType(schemaName).schema,
+    mapped,
+    fyo,
+    (target) => getDocType(target).schema
+  );
+  // Values the mapper left unset keep the new document's defaults.
+  const setValues = Object.entries(values).filter(
+    ([, value]) => !getIsNullOrUndef(value)
+  );
+  return newFrappeDoc(schemaName, Object.fromEntries(setValues));
+}
+
+/** The module of a Books DocType's controller, as Frappe's `get_module_name` builds it. */
+function getControllerModule(schemaName: string): string {
+  const { doctype, meta } = getDocType(schemaName);
+  const name = scrub(doctype);
+  return `frappe_books.${scrub(meta.module!)}.doctype.${name}.${name}`;
+}
+
+/** Frappe's `scrub`: `Books Sales Invoice` becomes `books_sales_invoice`. */
+function scrub(text: string): string {
+  return text.replace(/[ -]/g, '_').toLowerCase();
+}
+
+/** An open document, reloaded if asked and unedited, or the saved one loaded. */
+export async function getFrappeDoc(
+  schemaName: string,
+  name: string,
+  options: { refresh?: boolean } = {}
+): Promise<FrappeDoc> {
+  const open = docs.get(getKey(schemaName, name));
+  if (open) {
+    if (options.refresh) {
+      await open.refresh();
+    }
+
+    return open;
+  }
+
+  const { Model, schema } = getDocType(schemaName);
+  const doc = new Model(schema, { name }, fyo) as FrappeDoc;
+  await doc.load();
+  keep(doc);
+  return doc;
+}
+
+/** A saved document from `values` the server sent, kept open like a loaded one. */
+export async function openFrappeDoc(
+  schemaName: string,
+  values: DocValues
+): Promise<FrappeDoc> {
+  const { Model, schema } = getDocType(schemaName);
+  const doc = new Model(
+    schema,
+    { name: String(values.name) },
+    fyo
+  ) as FrappeDoc;
+  await doc.loadValues(values);
+  keep(doc);
+  return doc;
+}
+
+/** The open document, the saved one, or a new one when there is no saved one by `name`. */
+export async function getFrappeDocOrNew(
+  schemaName: string,
+  name?: string
+): Promise<FrappeDoc> {
+  if (!name) {
+    return newFrappeDoc(schemaName);
+  }
+
+  try {
+    return await getFrappeDoc(schemaName, name, { refresh: true });
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return newFrappeDoc(schemaName);
+    }
+
+    throw error;
+  }
+}
+
+export function forgetFrappeDoc(doc: FrappeDoc) {
+  for (const [key, open] of docs) {
+    if (open === doc) {
+      docs.delete(key);
+    }
+  }
+}
+
+/** Every open document, e.g. to find one a form script names. */
+export function getAllOpenFrappeDocs(): FrappeDoc[] {
+  return [...docs.values()];
+}
+
+/** The open documents of a schema, e.g. to show a customized form. */
+export function getOpenFrappeDocs(schemaName: string): FrappeDoc[] {
+  return [...docs.values()].filter((doc) => doc.schemaName === schemaName);
+}
+
+function keep(doc: FrappeDoc) {
+  docs.set(getKey(doc.schemaName, doc.name!), doc);
+  // Settings are read from `fyo.singles`; it holds the same open document.
+  if (doc.schema.isSingle) {
+    fyo.singles[doc.schemaName] = doc;
+  }
+
+  // A saved document is found by its saved name, not its temporary one.
+  doc.on('afterSync', () => {
+    forgetFrappeDoc(doc);
+    docs.set(getKey(doc.schemaName, doc.name!), doc);
+  });
+}
+
+function getKey(schemaName: string, name: string): string {
+  return `${schemaName}\u0000${name}`;
+}

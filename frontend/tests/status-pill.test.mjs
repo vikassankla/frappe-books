@@ -1,0 +1,58 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { fyo, StatusPill } from './helpers/ui.mjs';
+
+/** The status pill of a submitted invoice, as its component computes it. */
+function getBadge(values) {
+  const pill = {
+    doc: { schema: { isSubmittable: true, fields: [] }, ...values },
+    fyo,
+    t: (strings, ...parts) => String.raw({ raw: strings }, ...parts),
+  };
+  for (const [name, method] of Object.entries(StatusPill.methods)) {
+    pill[name] = method.bind(pill);
+  }
+  return StatusPill.computed.badge.call(pill);
+}
+
+test('a partly paid foreign-currency invoice shows the paid amount in the company currency', () => {
+  fyo.singles.SystemSettings = { currency: 'INR', currency_precision: 2 };
+  fyo.currencySymbols = { INR: '₹', USD: '$' };
+
+  const badge = getBadge({
+    status: 'Partly Paid',
+    grand_total: fyo.pesa(100),
+    base_grand_total: fyo.pesa(8000),
+    outstanding_amount: fyo.pesa(3000),
+  });
+
+  assert.equal(badge.label, 'Partly Paid ₹ 5,000.00');
+});
+
+test('a submitted sales quote shows its status, as an invoice does', () => {
+  // A submitted quote is Open, as in ERPNext, coloured by its DocType state.
+  const status = {
+    fieldname: 'status',
+    options: [{ value: 'Open', label: 'Open' }],
+    states: { Open: 'Green' },
+  };
+  const quote = {
+    schemaName: 'Quotation',
+    isSubmitted: true,
+    status: 'Open',
+  };
+
+  assert.notEqual(StatusPill.computed.showStatus?.call({ doc: quote }), false);
+  const pill = {
+    doc: { ...quote, schema: { isSubmittable: true, fields: [status] } },
+    fyo,
+    t: (strings, ...parts) => String.raw({ raw: strings }, ...parts),
+  };
+  for (const [name, method] of Object.entries(StatusPill.methods)) {
+    pill[name] = method.bind(pill);
+  }
+  assert.deepEqual(StatusPill.computed.badge.call(pill), {
+    label: 'Open',
+    theme: 'green',
+  });
+});

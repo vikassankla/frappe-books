@@ -1,0 +1,342 @@
+<template>
+  <ReadOnlyValue
+    v-if="isReadOnly"
+    :df="df"
+    :value="value"
+    :doc="doc"
+    :border="border"
+    :show-label="showLabel"
+    :required="isRequired"
+    :size="size"
+    :text-right="textRight"
+    :container-styles="containerStyles"
+  />
+  <FrappeTextInput
+    v-else
+    ref="input"
+    spellcheck="false"
+    :class="textInputClasses"
+    :type="inputType"
+    :inputmode="inputMode"
+    :model-value="inputValue"
+    :label="showLabel ? df.label : undefined"
+    :aria-label="showLabel ? undefined : df.label"
+    :description="showLabel ? df.sub_label : undefined"
+    :placeholder="inputPlaceholder"
+    :required="isRequired"
+    :size="frappeSize"
+    :variant="frappeVariant"
+    :step="step"
+    :max="isNumeric(df) ? df.maxvalue : undefined"
+    :min="isNumeric(df) ? df.minvalue : undefined"
+    :style="textInputStyles"
+    tabindex="0"
+    @blur="onBlur"
+    @focus="onFocus"
+    @input="onInput"
+  >
+    <template v-if="inlineLabel" #prefix>
+      <span ref="inlineLabel" class="text-base text-ink-gray-5">{{
+        df.label
+      }}</span>
+    </template>
+    <template v-if="isBarcodeField" #suffix>
+      <!-- Pulled toward the edge so the 32px button sits 4px in, as from top and bottom. -->
+      <BarcodeScanButton
+        class="-me-2"
+        variant="ghost"
+        size="md"
+        @scan="(code: string) => triggerChange(code)"
+      />
+    </template>
+    <template v-else-if="suffix" #suffix>
+      <span class="text-base text-ink-gray-5" aria-hidden="true">{{
+        suffix
+      }}</span>
+    </template>
+  </FrappeTextInput>
+</template>
+<script lang="ts">
+import { FrappeDoc } from 'src/frappe/document';
+import type { FieldState } from 'src/frappe/fieldState';
+import { TextInput as FrappeTextInput } from 'frappe-ui';
+import { Field } from 'schemas/types';
+import { isNumeric } from 'src/utils';
+import { isMobile } from 'src/utils/viewport';
+import { getIsNullOrUndef } from 'utils/index';
+import { defineComponent, markRaw, PropType } from 'vue';
+import BarcodeScanButton from 'src/mobile/scan/BarcodeScanButton.vue';
+import ReadOnlyValue from './ReadOnlyValue.vue';
+
+export default defineComponent({
+  name: 'Base',
+  components: { BarcodeScanButton, FrappeTextInput, ReadOnlyValue },
+  inject: {
+    injectedDoc: {
+      from: 'doc',
+      default: undefined,
+    },
+  },
+  props: {
+    df: { type: Object as PropType<Field>, required: true },
+    step: { type: Number, default: 1 },
+    value: [String, Number, Boolean, Object],
+    inputClass: [String, Array] as PropType<string | string[]>,
+    border: { type: Boolean, default: false },
+    size: { type: String, default: 'large' },
+    placeholder: String,
+    showLabel: { type: Boolean, default: false },
+    containerStyles: { type: Object, default: () => ({}) },
+    textRight: {
+      type: [null, Boolean] as PropType<boolean | null>,
+      default: null,
+    },
+    readOnly: {
+      type: [null, Boolean] as PropType<boolean | null>,
+      default: null,
+    },
+    required: {
+      type: [null, Boolean] as PropType<boolean | null>,
+      default: null,
+    },
+    /** Marks the field red. Desktop also marks empty required fields. */
+    invalid: { type: Boolean, default: false },
+    /** Names the value inside the control where no label is shown. */
+    inlineLabel: Boolean,
+    /** Marks a required value with `*` after it, as report filters do. */
+    requiredMark: Boolean,
+  },
+  emits: ['focus', 'input', 'change'],
+  data() {
+    return {
+      /** Room the input leaves for the inline label, measured as its font loads. */
+      inlineLabelPadding: '',
+      labelObserver: null as ResizeObserver | null,
+    };
+  },
+  computed: {
+    isMobile(): boolean {
+      return isMobile.value;
+    },
+    /** Phones scan barcodes with the camera. */
+    isBarcodeField(): boolean {
+      return this.isMobile && this.df.fieldname === 'barcode';
+    },
+    inputValue(): string | number {
+      if (typeof this.value === 'number' || typeof this.value === 'string') {
+        return this.value;
+      }
+
+      return this.value == null ? '' : String(this.value);
+    },
+    frappeSize(): 'sm' | 'md' | 'lg' {
+      // 16px text on phones keeps iOS from zooming into a focused field.
+      if (this.isMobile) {
+        return 'lg';
+      }
+
+      if (this.size === 'small') {
+        return 'sm';
+      }
+
+      return this.size === 'xlarge' ? 'lg' : 'md';
+    },
+    frappeVariant(): 'outline' | 'ghost' | 'subtle' {
+      if (!this.border) {
+        return 'ghost';
+      }
+
+      return this.isMobile ? 'subtle' : 'outline';
+    },
+    controlClasses(): (string | string[])[] {
+      const classes: (string | string[])[] = [];
+      if (this.inputClass) {
+        classes.push(this.inputClass);
+      }
+      // An inline label keeps the value beside it.
+      if ((this.textRight ?? isNumeric(this.df)) && !this.inlineLabel) {
+        // TextInput can't align its text (frappe/frappe-ui#1256).
+        classes.push('[&_input]:text-end');
+      }
+      if (isNumeric(this.df)) {
+        // Inputs don't inherit tabular-nums from the wrapper.
+        classes.push('[&_input]:tabular-nums');
+      }
+      if (this.invalid || (!this.isMobile && this.showMandatory)) {
+        // `error` shows a message, not a border (frappe/frappe-ui#1252).
+        // Select and Combobox put the class on their trigger without a label, on a wrapper with one.
+        classes.push(
+          '[&_[data-slot=control]]:border-outline-red-3',
+          '[&_[data-slot=trigger]]:border-outline-red-3',
+          'data-[slot=trigger]:border-outline-red-3'
+        );
+      }
+      return classes;
+    },
+    /** TextInput's prefix is sized for an icon, so the input makes room for the inline label. */
+    textInputClasses(): (string | string[])[] {
+      if (!this.inlineLabel) {
+        return this.controlClasses;
+      }
+
+      return [...this.controlClasses, '[&_input]:ps-[--inline-label-padding]'];
+    },
+    textInputStyles(): Record<string, string> {
+      if (!this.inlineLabel) {
+        return this.containerStyles;
+      }
+
+      return {
+        ...this.containerStyles,
+        '--inline-label-padding': this.inlineLabelPadding,
+      };
+    },
+    doc(): FrappeDoc | undefined {
+      const doc = this.injectedDoc;
+
+      if (doc instanceof FrappeDoc) {
+        return doc;
+      }
+
+      return undefined;
+    },
+    inputType(): 'text' {
+      return 'text';
+    },
+    inputMode(): string | undefined {
+      return undefined;
+    },
+    /** Text the input ends with, like a percent's `%`. */
+    suffix(): string {
+      return '';
+    },
+    inputPlaceholder(): string {
+      return this.placeholder || this.df.placeholder || this.df.label;
+    },
+    showsRequiredMark(): boolean {
+      return this.requiredMark && this.isRequired;
+    },
+    showMandatory(): boolean {
+      return this.isEmpty && this.isRequired;
+    },
+    isEmpty(): boolean {
+      if (Array.isArray(this.value) && !this.value.length) {
+        return true;
+      }
+
+      if (typeof this.value === 'string' && !this.value) {
+        return true;
+      }
+
+      if (getIsNullOrUndef(this.value)) {
+        return true;
+      }
+
+      return false;
+    },
+    fieldState(): FieldState | undefined {
+      return this.doc?.getFieldState(this.df);
+    },
+    isReadOnly(): boolean {
+      if (typeof this.readOnly === 'boolean') {
+        return this.readOnly;
+      }
+
+      return this.fieldState?.readOnly ?? !!this.df.readOnly;
+    },
+    isRequired(): boolean {
+      if (typeof this.required === 'boolean') {
+        return this.required;
+      }
+
+      // As in Desk, a field no one can fill, e.g. on a submitted document, is not marked.
+      return (
+        !this.isReadOnly && (this.fieldState?.required ?? !!this.df.required)
+      );
+    },
+  },
+  mounted() {
+    // TextInput's prefix is absolutely placed, so the input pads by the label's width.
+    const label = this.$refs.inlineLabel as HTMLElement | undefined;
+    const prefix = label?.parentElement;
+    if (!label || !prefix) {
+      return;
+    }
+
+    this.labelObserver = markRaw(
+      new ResizeObserver(() => {
+        this.inlineLabelPadding = `${prefix.offsetWidth + 8}px`;
+      })
+    );
+    this.labelObserver.observe(label);
+  },
+  beforeUnmount() {
+    this.labelObserver?.disconnect();
+  },
+  methods: {
+    onBlur(e: FocusEvent) {
+      const target = e.target;
+      if (!(target instanceof HTMLInputElement)) {
+        return;
+      }
+
+      if (this.isReadOnly) {
+        return;
+      }
+
+      this.triggerChange(target.value);
+    },
+    onFocus(e: FocusEvent) {
+      if (!this.isReadOnly) {
+        this.$emit('focus', e);
+      }
+    },
+    onInput(e: Event) {
+      if (!this.isReadOnly) {
+        this.$emit('input', e);
+      }
+    },
+    focus(): void {
+      this.getInputElement()?.focus();
+    },
+    getInputElement(): HTMLInputElement | HTMLTextAreaElement | null {
+      const control = this.$refs.input as
+        | HTMLInputElement
+        | HTMLTextAreaElement
+        | {
+            inputElement?: HTMLInputElement | HTMLTextAreaElement | null;
+            $el?: HTMLElement;
+          }
+        | undefined;
+
+      if (
+        control instanceof HTMLInputElement ||
+        control instanceof HTMLTextAreaElement
+      ) {
+        return control;
+      }
+
+      return (
+        control?.inputElement ??
+        control?.$el?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+          'input, textarea'
+        ) ??
+        null
+      );
+    },
+    triggerChange(value: unknown): void {
+      value = this.parse(value);
+
+      if (value === '') {
+        value = null;
+      }
+
+      this.$emit('change', value);
+    },
+    parse(value: unknown): unknown {
+      return value;
+    },
+    isNumeric,
+  },
+});
+</script>

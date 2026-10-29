@@ -1,0 +1,230 @@
+{
+ "actions": [],
+ "allow_bulk_edit": 1,
+ "autoname": "format:{##########}",
+ "creation": "2026-08-27 22:09:40.235542",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "default_section_break_1",
+  "posting_date",
+  "posting_time",
+  "posting_datetime",
+  "details_section_break_3",
+  "warehouse",
+  "batch_no",
+  "serial_no",
+  "item_code",
+  "incoming_rate",
+  "actual_qty",
+  "valuation_section_break",
+  "stock_value_difference",
+  "qty_after_transaction",
+  "stock_value",
+  "stock_queue",
+  "reference_section_break_10",
+  "voucher_type",
+  "voucher_no",
+  "is_cancelled",
+  "company"
+ ],
+ "fields": [
+  {
+   "fieldname": "default_section_break_1",
+   "fieldtype": "Section Break",
+   "label": "Default"
+  },
+  {
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "label": "Posting Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "posting_time",
+   "fieldtype": "Time",
+   "label": "Posting Time",
+   "read_only": 1
+  },
+  {
+   "fieldname": "posting_datetime",
+   "fieldtype": "Datetime",
+   "label": "Posting Datetime",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "details_section_break_3",
+   "fieldtype": "Section Break",
+   "label": "Details"
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "label": "Warehouse",
+   "options": "Books Warehouse",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "batch_no",
+   "fieldtype": "Link",
+   "label": "Batch No",
+   "options": "Books Batch",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "serial_no",
+   "fieldtype": "Link",
+   "label": "Serial No",
+   "options": "Books Serial No",
+   "read_only": 1
+  },
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "label": "Item Code",
+   "options": "Books Item",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "incoming_rate",
+   "fieldtype": "Currency",
+   "label": "Incoming Rate",
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "actual_qty",
+   "fieldtype": "Float",
+   "label": "Qty Change",
+   "read_only": 1
+  },
+  {
+   "fieldname": "valuation_section_break",
+   "fieldtype": "Section Break",
+   "label": "Valuation"
+  },
+  {
+   "fieldname": "stock_value_difference",
+   "fieldtype": "Currency",
+   "hidden": 1,
+   "label": "Change in Stock Value",
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "qty_after_transaction",
+   "fieldtype": "Float",
+   "hidden": 1,
+   "label": "Qty After Transaction",
+   "read_only": 1
+  },
+  {
+   "fieldname": "stock_value",
+   "fieldtype": "Currency",
+   "hidden": 1,
+   "label": "Balance Stock Value",
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
+   "description": "FIFO layers as [quantity, rate] pairs after this entry.",
+   "fieldname": "stock_queue",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "FIFO Stock Queue (qty, rate)",
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "reference_section_break_10",
+   "fieldtype": "Section Break",
+   "label": "Reference"
+  },
+  {
+   "fieldname": "voucher_type",
+   "fieldtype": "Link",
+   "label": "Voucher Type",
+   "options": "DocType",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voucher_no",
+   "fieldtype": "Dynamic Link",
+   "label": "Voucher No",
+   "options": "voucher_type",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_cancelled",
+   "fieldtype": "Check",
+   "label": "Is Cancelled",
+   "read_only": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Company",
+   "options": "Books Company"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-10-24 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Books",
+ "name": "Books Stock Ledger Entry",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Books Manager",
+   "share": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Books Manager"
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Books User"
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "posting_datetime",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

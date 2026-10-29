@@ -1,0 +1,115 @@
+"""Country-specific records and validation on the stable hosted schema."""
+
+import re
+
+import frappe
+from frappe import _
+
+from frappe_books.coa import ensure_account
+from frappe_books.settings import company_country
+
+INDIAN_STATES = {
+	"01": "Jammu and Kashmir",
+	"02": "Himachal Pradesh",
+	"03": "Punjab",
+	"04": "Chandigarh",
+	"05": "Uttarakhand",
+	"06": "Haryana",
+	"07": "Delhi",
+	"08": "Rajasthan",
+	"09": "Uttar Pradesh",
+	"10": "Bihar",
+	"11": "Sikkim",
+	"12": "Arunachal Pradesh",
+	"13": "Nagaland",
+	"14": "Manipur",
+	"15": "Mizoram",
+	"16": "Tripura",
+	"17": "Meghalaya",
+	"18": "Assam",
+	"19": "West Bengal",
+	"20": "Jharkhand",
+	"21": "Odisha",
+	"22": "Chattisgarh",
+	"23": "Madhya Pradesh",
+	"24": "Gujarat",
+	"26": "Dadra and Nagar Haveli and Daman and Diu",
+	"27": "Maharashtra",
+	"29": "Karnataka",
+	"30": "Goa",
+	"31": "Lakshadweep",
+	"32": "Kerala",
+	"33": "Tamil Nadu",
+	"34": "Puducherry",
+	"35": "Andaman and Nicobar Islands",
+	"36": "Telangana",
+	"37": "Andhra Pradesh",
+	"38": "Ladakh",
+}
+GSTIN_PATTERN = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+HSN_CODE_PATTERN = re.compile(r"[0-9]{4,8}")
+GST_RATES = (28, 18, 12, 6, 5, 3, 0.25, 0)
+# The seeded GST accounts are named after the GST head they hold.
+GST_HEADS = ("CGST", "SGST", "IGST", "Exempt")
+
+
+def ensure_regional_records(country):
+	if country != "India":
+		return
+	for account in GST_HEADS:
+		ensure_account(account, "Duties and Taxes", "Liability", "Tax").db_set("gst_head", account)
+	for tax_type, rates in {
+		"GST": GST_RATES,
+		"IGST": GST_RATES,
+		"Exempt-GST": (0,),
+		"Exempt-IGST": (0,),
+	}.items():
+		for rate in rates:
+			name = f"{tax_type}-{rate}"
+			if frappe.db.exists("Books Item Tax Template", name):
+				continue
+			frappe.get_doc(
+				{
+					"doctype": "Books Item Tax Template",
+					"title": name,
+					"taxes": _tax_details(tax_type, rate),
+				}
+			).insert(ignore_permissions=True)
+
+
+def ensure_address_template(country):
+	"""Frappe renders addresses by the default Address Template, which a site without ERPNext lacks."""
+	if not frappe.db.exists("Address Template", {"is_default": 1}):
+		frappe.get_doc({"doctype": "Address Template", "country": country, "is_default": 1}).insert(
+			ignore_permissions=True
+		)
+
+
+def gst_state(address):
+	"""The GST state of an address: its state, when it is an Indian one."""
+	if address.country == "India" and address.state in INDIAN_STATES.values():
+		return address.state
+
+
+def validate_gstin(gstin):
+	gstin = (gstin or "").strip().upper()
+	if not GSTIN_PATTERN.fullmatch(gstin) or gstin[:2] not in INDIAN_STATES:
+		frappe.throw(_("Enter a valid 15-character Indian GSTIN."))
+	return gstin
+
+
+def validate_hsn_codes(docs, fieldname="hsn_code"):
+	"""HSN/SAC is India's GST code, so only an Indian company's codes are checked."""
+	codes = [str(doc.get(fieldname)) for doc in docs if doc.get(fieldname)]
+	invalid = [code for code in codes if not HSN_CODE_PATTERN.fullmatch(code)]
+	if invalid and company_country() == "India":
+		frappe.throw(_("HSN/SAC code must contain between 4 and 8 digits."))
+
+
+def _tax_details(tax_type, rate):
+	if tax_type == "GST":
+		return [
+			{"tax_type": "CGST", "tax_rate": rate / 2},
+			{"tax_type": "SGST", "tax_rate": rate / 2},
+		]
+	return [{"tax_type": tax_type.split("-")[0], "tax_rate": rate}]

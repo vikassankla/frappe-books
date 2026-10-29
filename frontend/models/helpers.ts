@@ -1,0 +1,494 @@
+import { isAccessoryMode, toActiveDoctype } from 'src/frappe/mode';
+import { ERPNEXT_STATUS_COLORS } from 'src/frappe/erpnextStatusColors';
+import {
+  Action,
+  BadgeData,
+  BadgeTheme,
+  ColumnConfig,
+  RenderData,
+} from 'fyo/model/types';
+import { Fyo, t } from 'fyo';
+import type { DocValue } from 'fyo/core/types';
+import { OptionField, Schema } from 'schemas/types';
+import { ModelNameEnum } from './types';
+
+import type { FrappeDoc } from 'src/frappe/document';
+import type { Invoice as InvoiceDoc } from './invoices/Invoice';
+import { Money } from 'pesa';
+import { Router } from 'vue-router';
+import { getDocType } from 'src/frappe/doctypes';
+import { getMappedDoc } from 'src/frappe/documents';
+import { toFrappeValue } from 'src/frappe/values';
+import { DateTime } from 'luxon';
+import { getReports } from 'reports';
+import { canOpenReport } from 'reports/serverReport';
+
+// POS.vue imports it from here.
+
+/** What a mapped document action builds, and how it opens the new document. */
+export interface MappedDocAction extends Omit<Action, 'action'> {
+  /** The schema to build, and the mapper of the source DocType that builds it. */
+  target: (doc: FrappeDoc) => [schemaName: string, mapper: string];
+  /** Opens the new document; its form unless given. */
+  open?: (
+    mapped: FrappeDoc,
+    router: Router,
+    source: FrappeDoc
+  ) => Promise<void>;
+}
+
+/** An action that builds a new document from the one it runs on with a server mapper, then opens it. */
+export function getMappedDocAction(
+  fyo: Fyo,
+  { target, open = openForm, ...action }: MappedDocAction
+): Action {
+  return {
+    ...action,
+    // Shown only to users who may create the new document.
+    condition: (doc: FrappeDoc) =>
+      (action.condition?.(doc) ?? true) && fyo.can(target(doc)[0], 'create'),
+    action: async (doc: FrappeDoc, router: Router) => {
+      const [schemaName, mapper] = target(doc);
+      await open(await getMappedDoc(doc, schemaName, mapper), router, doc);
+    },
+  };
+}
+
+async function openForm(mapped: FrappeDoc, router: Router) {
+  await router.push(`/edit/${mapped.schemaName}/${mapped.name!}`);
+}
+
+export function getQuoteActions(
+  fyo: Fyo,
+  schemaName: ModelNameEnum.Quotation
+): Action[] {
+  return [getMakeInvoiceAction(fyo, schemaName)];
+}
+
+export function getLeadActions(fyo: Fyo): Action[] {
+  return [getCreateCustomerAction(fyo), getQuotationAction(fyo)];
+}
+
+export function getInvoiceActions(
+  fyo: Fyo,
+  schemaName: ModelNameEnum.SalesInvoice | ModelNameEnum.PurchaseInvoice
+): Action[] {
+  // A return refunds, so a sales return pays and a purchase return receives.
+  const nextStep = (doc: FrappeDoc) =>
+    (schemaName === ModelNameEnum.SalesInvoice) !== !!doc.return_against
+      ? fyo.t`Receive payment`
+      : fyo.t`Make payment`;
+
+  return [
+    { ...getMakePaymentAction(fyo), nextStep },
+    getMakeStockTransferAction(fyo, schemaName),
+    getLedgerLinkAction(fyo),
+    getMakeReturnDocAction(fyo),
+  ];
+}
+
+export function getStockTransferActions(
+  fyo: Fyo,
+  schemaName: ModelNameEnum.DeliveryNote | ModelNameEnum.PurchaseReceipt
+): Action[] {
+  return [
+    getMakeInvoiceAction(fyo, schemaName),
+    getLedgerLinkAction(fyo, false),
+    getLedgerLinkAction(fyo, true),
+    getMakeReturnDocAction(fyo),
+  ];
+}
+
+export function getMakeStockTransferAction(
+  fyo: Fyo,
+  schemaName: ModelNameEnum.SalesInvoice | ModelNameEnum.PurchaseInvoice
+): Action {
+  let label = fyo.t`Delivery Note`;
+  if (schemaName === ModelNameEnum.PurchaseInvoice) {
+    label = fyo.t`Purchase Receipt`;
+  }
+
+  return getMappedDocAction(fyo, {
+    label,
+    group: fyo.t`Create`,
+    condition: (doc: FrappeDoc) =>
+      doc.isSubmitted && (doc as InvoiceDoc).hasStockToTransfer,
+    target: (doc: FrappeDoc) => {
+      const invoice = doc as InvoiceDoc;
+      return [invoice.stockTransferSchemaName, invoice.stockTransferMapper];
+    },
+  });
+}
+
+export function getMakeInvoiceAction(
+  fyo: Fyo,
+  schemaName:
+    | ModelNameEnum.DeliveryNote
+    | ModelNameEnum.PurchaseReceipt
+    | ModelNameEnum.Quotation
+): Action {
+  const isPurchase = schemaName === ModelNameEnum.PurchaseReceipt;
+  const [invoiceSchemaName, mapper] = isPurchase
+    ? [ModelNameEnum.PurchaseInvoice, 'make_purchase_invoice']
+    : [ModelNameEnum.SalesInvoice, 'make_sales_invoice'];
+  return getMappedDocAction(fyo, {
+    label: isPurchase ? fyo.t`Purchase Invoice` : fyo.t`Sales Invoice`,
+    group: fyo.t`Create`,
+    condition: (doc: FrappeDoc) => {
+      // Quotes to leads are not invoiced.
+      if (schemaName === ModelNameEnum.Quotation) {
+        return (
+          doc.isSubmitted &&
+          doc.quotation_to === toActiveDoctype('Books Customer')
+        );
+      }
+
+      // A transfer made from an invoice is fully billed.
+      return (
+        doc.isSubmitted &&
+        !doc.return_against &&
+        ((doc.per_billed as number) ?? 0) < 100
+      );
+    },
+    target: () => [invoiceSchemaName, mapper],
+  });
+}
+
+export function getCreateCustomerAction(fyo: Fyo): Action {
+  return getMappedDocAction(fyo, {
+    group: fyo.t`Create`,
+    label: fyo.t`Customer`,
+    condition: (doc: FrappeDoc) => !doc.notInserted,
+    target: () => [ModelNameEnum.Customer, 'make_customer'],
+  });
+}
+
+export function getQuotationAction(fyo: Fyo): Action {
+  return getMappedDocAction(fyo, {
+    group: fyo.t`Create`,
+    label: fyo.t`Quotation`,
+    condition: (doc: FrappeDoc) => !doc.notInserted,
+    target: () => [ModelNameEnum.Quotation, 'make_quotation'],
+  });
+}
+
+export function getMakePaymentAction(fyo: Fyo): Action {
+  return getMappedDocAction(fyo, {
+    label: fyo.t`Payment`,
+    group: fyo.t`Create`,
+    condition: (doc: FrappeDoc) =>
+      doc.isSubmitted && !(doc.outstanding_amount as Money).isZero(),
+    target: () => [ModelNameEnum.PaymentEntry, 'make_payment'],
+    open: openPayment,
+  });
+}
+
+/** Opens a payment in a quick edit; once it is submitted, the invoice shows what is left to pay. */
+async function openPayment(
+  payment: FrappeDoc,
+  router: Router,
+  invoice: FrappeDoc
+) {
+  const currentRoute = router.currentRoute.value.fullPath;
+  payment.once('afterSubmit', async () => {
+    await invoice.load();
+    await router.push(currentRoute);
+  });
+
+  // The party and its account come from the invoice.
+  const partyAccountField =
+    payment.payment_type === 'Receive' ? 'paid_from' : 'paid_to';
+  const hideFields = ['party_type', 'party', 'references', partyAccountField];
+
+  if (!payment.fyo.isFeatureOn('enable_invoice_returns')) {
+    hideFields.push('payment_type');
+  }
+
+  const { openQuickEdit } = await import('src/utils/ui');
+  await openQuickEdit({
+    doc: payment,
+    hideFields,
+  });
+}
+
+type LedgerReport = 'GeneralLedger' | 'StockLedger';
+
+export function getLedgerLinkAction(fyo: Fyo, isStock = false): Action {
+  let label = fyo.t`Accounting entries`;
+  let reportClassName: LedgerReport = 'GeneralLedger';
+
+  if (isStock) {
+    label = fyo.t`Stock entries`;
+    reportClassName = 'StockLedger';
+  }
+
+  return {
+    label,
+    group: fyo.t`View`,
+    condition: (doc: FrappeDoc) =>
+      doc.isSubmitted && canOpenLedger(reportClassName),
+    action: async (doc: FrappeDoc, router: Router) => {
+      const route = getLedgerLink(doc, reportClassName);
+      await router.push(route);
+    },
+  };
+}
+
+/** Whether the user may open the ledger report. */
+export function canOpenLedger(reportClassName: LedgerReport): boolean {
+  const report = getReports()[reportClassName];
+  return !!report && canOpenReport(report.serverReportName);
+}
+
+/** The report of the document's entries, which all post on its date. */
+export function getLedgerLink(doc: FrappeDoc, reportClassName: LedgerReport) {
+  const report = getReports()[reportClassName]!;
+  const filters = report.getVoucherFilters(
+    getDocType(doc.schemaName).doctype,
+    doc.name!,
+    getPostingDate(doc)
+  );
+  return {
+    name: 'Report',
+    params: {
+      reportClassName,
+    },
+    query: {
+      defaultFilters: JSON.stringify(filters),
+    },
+  };
+}
+
+/** Local midnight of the day, in the system time zone, the server posts the document on. */
+function getPostingDate(doc: FrappeDoc): Date {
+  const field = doc.fieldMap.date ?? doc.fieldMap.posting_date;
+  const value = doc.get(field.fieldname) as DocValue;
+  const day = String(toFrappeValue(value, field, doc.fyo)).slice(0, 10);
+  return DateTime.fromISO(day).toJSDate();
+}
+
+export function getMakeReturnDocAction(fyo: Fyo): Action {
+  return getMappedDocAction(fyo, {
+    label: fyo.t`Return`,
+    group: fyo.t`Create`,
+    condition: (doc: FrappeDoc) =>
+      fyo.isFeatureOn('enable_invoice_returns') &&
+      doc.isSubmitted &&
+      !doc.isReturn &&
+      !doc.is_fully_returned,
+    target: (doc: FrappeDoc) => [doc.schemaName, 'make_return'],
+  });
+}
+
+export function getLeadStatusColumn(): ColumnConfig {
+  return {
+    label: t`Status`,
+    fieldname: 'status',
+    fieldtype: 'Select',
+    badge(doc) {
+      const status = String(doc.status ?? '');
+      return (
+        getStateBadge(doc.schema, status) ?? { label: status, theme: 'gray' }
+      );
+    },
+  };
+}
+
+/** Frappe UI badge themes for the colours a DocType state can have. */
+const stateThemes: Record<string, BadgeTheme | undefined> = {
+  Blue: 'blue',
+  Cyan: 'blue',
+  'Light Blue': 'blue',
+  Gray: 'gray',
+  Green: 'green',
+  Orange: 'amber',
+  Yellow: 'amber',
+  Red: 'red',
+  Pink: 'red',
+  Purple: 'violet',
+};
+
+/**
+ * A stored status as its `status` option labels it and its DocType state
+ * colours it, else ERPNext's list view in accessory mode.
+ */
+export function getStateBadge(
+  schema: Schema | undefined,
+  status: string
+): BadgeData | undefined {
+  const field = schema?.fields.find(
+    ({ fieldname }) => fieldname === 'status'
+  ) as OptionField | undefined;
+  const color =
+    field && (field.states?.[status] ?? getERPNextStatusColor(schema!, status));
+  if (!color) {
+    return undefined;
+  }
+
+  const option = field!.options.find(({ value }) => value === status);
+  return {
+    label: option?.label ?? status,
+    theme: stateThemes[color] ?? 'gray',
+  };
+}
+
+function getERPNextStatusColor(
+  schema: Schema,
+  status: string
+): string | undefined {
+  return isAccessoryMode()
+    ? ERPNEXT_STATUS_COLORS[getDocType(schema.name).doctype]?.[status]
+    : undefined;
+}
+
+/** Unsaved and docstatus badges, which Frappe's desk also draws without states. */
+function getDocstatusBadge(status: string): BadgeData {
+  switch (status) {
+    case 'Draft':
+      return { label: t`Draft`, theme: 'gray' };
+    case 'NotSaved':
+      // Frappe's desk shows Not Saved in orange; amber is frappe-ui's nearest.
+      return { label: t`Not Saved`, theme: 'amber' };
+    case 'Saved':
+      return { label: t`Saved`, theme: 'blue' };
+    case 'Submitted':
+      return { label: t`Submitted`, theme: 'green' };
+    case 'Cancelled':
+      return { label: t`Cancelled`, theme: 'red' };
+    default:
+      return { label: status, theme: 'gray' };
+  }
+}
+
+export function getDocStatusBadge(doc: RenderData | FrappeDoc): BadgeData {
+  const status = getDocStatus(doc);
+  return getStateBadge(doc.schema, status) ?? getDocstatusBadge(status);
+}
+
+export function getDocStatus(doc?: RenderData | FrappeDoc): string {
+  if (!doc) {
+    return '';
+  }
+
+  // A new document is not saved yet, as Frappe's desk shows it.
+  if (doc.notInserted || doc.dirty) {
+    return 'NotSaved';
+  }
+
+  if (!doc.schema?.isSubmittable) {
+    return 'Saved';
+  }
+
+  // The server stores the status of documents that have a status field.
+  if (doc.status) {
+    return doc.status as string;
+  }
+
+  // A list row has only the docstatus of a document without a status field.
+  if (doc.cancelled || doc.docstatus === 2) {
+    return 'Cancelled';
+  }
+
+  return doc.submitted || doc.docstatus === 1 ? 'Submitted' : 'Saved';
+}
+
+export function getSerialNumberStatusColumn(): ColumnConfig {
+  return {
+    label: t`Status`,
+    fieldname: 'status',
+    fieldtype: 'Select',
+    badge(doc) {
+      const status = typeof doc.status === 'string' ? doc.status : 'Inactive';
+      return (
+        getStateBadge(doc.schema, status) ?? { label: status, theme: 'gray' }
+      );
+    },
+  };
+}
+
+export function getPriceListStatusColumn(): ColumnConfig {
+  return {
+    label: t`Enabled For`,
+    fieldname: 'enabledFor',
+    fieldtype: 'Select',
+    badge({ selling: isSales, buying: isPurchase }) {
+      let label = t`None`;
+
+      if (isSales && isPurchase) {
+        label = t`Sales and Purchase`;
+      } else if (isSales) {
+        label = t`Sales`;
+      } else if (isPurchase) {
+        label = t`Purchase`;
+      }
+
+      return { theme: 'gray', label };
+    },
+  };
+}
+
+/** A badge of whether the document is enabled, by its check `fieldname`, or by ERPNext's `disable` check. */
+export function getIsDocEnabledColumn(fieldname = 'is_enabled'): ColumnConfig {
+  const isDisableField = fieldname === 'disable';
+  return {
+    label: t`Enabled`,
+    fieldname: 'enabled',
+    fieldtype: 'Data',
+    badge(doc) {
+      if (isDisableField !== !!doc[fieldname]) {
+        return { theme: 'green', label: t`Enabled` };
+      }
+
+      return { theme: 'amber', label: t`Disabled` };
+    },
+  };
+}
+
+export function getDocStatusListColumn(): ColumnConfig {
+  return {
+    label: t`Status`,
+    fieldname: 'status',
+    fieldtype: 'Select',
+    badge: getDocStatusBadge,
+  };
+}
+
+export function getLoyaltyProgramStatusColumn(): ColumnConfig {
+  return {
+    label: t`Status`,
+    fieldname: 'status',
+    fieldtype: 'Select',
+    badge: (doc) => getLoyaltyProgramBadge(doc),
+  };
+}
+
+export function getLoyaltyProgramBadge(doc: RenderData | FrappeDoc): BadgeData {
+  const status = doc.status as string;
+  return (
+    getStateBadge(doc.schema, status) ?? { theme: 'gray', label: status ?? '' }
+  );
+}
+
+/** Adds `quantity` of an item to a document's rows, to its row of the item if it has one. */
+export async function addItem(name: string, doc: FrappeDoc, quantity = 1) {
+  if (!doc.canEdit) {
+    return;
+  }
+
+  const rows = (doc.items ?? []) as FrappeDoc[];
+  const row = rows.find((existing) => existing.item_code === name);
+  if (row) {
+    await row.set('qty', ((row.qty as number) ?? 0) + quantity);
+    return;
+  }
+
+  await doc.append('items');
+  const added = (doc.items as FrappeDoc[] | undefined)?.at(-1);
+  if (!added) {
+    return;
+  }
+
+  await added.set('item_code', name);
+  // Stock rows have no default quantity.
+  await added.set('qty', quantity);
+}

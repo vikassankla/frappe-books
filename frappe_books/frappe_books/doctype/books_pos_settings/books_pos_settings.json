@@ -1,0 +1,178 @@
+{
+ "actions": [],
+ "allow_bulk_edit": 1,
+ "creation": "2026-08-27 22:09:39.939030",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "default_section_break_1",
+  "warehouse",
+  "pos_profile",
+  "cash_account",
+  "write_off_account",
+  "default_account",
+  "barcode_section_break_9",
+  "weight_enabled_barcode",
+  "check_digits",
+  "item_code_digits",
+  "item_weight_digits",
+  "default_section_break_13",
+  "item_visibility",
+  "allow_rate_change",
+  "hide_unavailable_items",
+  "allow_discount_change",
+  "ignore_pricing_rule"
+ ],
+ "fields": [
+  {
+   "fieldname": "default_section_break_1",
+   "fieldtype": "Section Break",
+   "label": "Default"
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "label": "Warehouse",
+   "options": "Books Warehouse"
+  },
+  {
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "label": "POS Profile",
+   "options": "Books POS Profile"
+  },
+  {
+   "fieldname": "cash_account",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Counter Cash Account",
+   "options": "Books Account"
+  },
+  {
+   "fieldname": "write_off_account",
+   "fieldtype": "Link",
+   "label": "Write Off Account",
+   "options": "Books Account"
+  },
+  {
+   "fieldname": "default_account",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Default Account",
+   "options": "Books Account"
+  },
+  {
+   "fieldname": "barcode_section_break_9",
+   "fieldtype": "Section Break",
+   "label": "Barcode"
+  },
+  {
+   "default": "0",
+   "fieldname": "weight_enabled_barcode",
+   "fieldtype": "Check",
+   "label": "Weight Enabled Barcode"
+  },
+  {
+   "default": "0",
+   "depends_on": "weight_enabled_barcode",
+   "description": "The digits that scale barcodes start with, such as 21.",
+   "fieldname": "check_digits",
+   "fieldtype": "Int",
+   "label": "Barcode Prefix"
+  },
+  {
+   "default": "0",
+   "depends_on": "weight_enabled_barcode",
+   "fieldname": "item_code_digits",
+   "fieldtype": "Int",
+   "label": "Item Code Digits"
+  },
+  {
+   "default": "0",
+   "depends_on": "weight_enabled_barcode",
+   "fieldname": "item_weight_digits",
+   "fieldtype": "Int",
+   "label": "Item Weight Digits"
+  },
+  {
+   "fieldname": "default_section_break_13",
+   "fieldtype": "Section Break",
+   "label": "Default"
+  },
+  {
+   "default": "Inventory Items",
+   "fieldname": "item_visibility",
+   "fieldtype": "Select",
+   "label": "Item Visibility",
+   "options": "Inventory Items\nNon-Inventory Items\nAll Items"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_rate_change",
+   "fieldtype": "Check",
+   "label": "Allow User to Edit Rate"
+  },
+  {
+   "default": "0",
+   "fieldname": "hide_unavailable_items",
+   "fieldtype": "Check",
+   "label": "Hide Unavailable Items"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_discount_change",
+   "fieldtype": "Check",
+   "label": "Allow User to Edit Discount"
+  },
+  {
+   "default": "0",
+   "fieldname": "ignore_pricing_rule",
+   "fieldtype": "Check",
+   "label": "Ignore Pricing Rule"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-10-25 21:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Books",
+ "name": "Books POS Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "Books Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "Books User"
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

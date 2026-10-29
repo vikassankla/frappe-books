@@ -1,0 +1,83 @@
+import frappe
+from frappe.tests import IntegrationTestCase
+from frappe.utils import add_to_date, now_datetime
+
+from frappe_books.frappe_books.doctype.books_delivery_note.test_books_delivery_note import (
+	account_balance,
+	seed_stock,
+)
+from frappe_books.frappe_books.doctype.books_purchase_receipt.test_books_purchase_receipt import (
+	make_receipt,
+	stock_value_change,
+)
+from frappe_books.frappe_books.doctype.books_stock_entry.test_books_stock_entry import (
+	movement_values,
+)
+from frappe_books.tests.accounting import (
+	ledger_entries,
+	make_account,
+	make_customer,
+	make_item,
+	make_warehouse,
+	posting_values,
+	set_inventory_accounts,
+)
+
+
+class IntegrationTestStockPosting(IntegrationTestCase):
+	def test_backdated_receipt_restates_a_transfer_its_delivery_note_and_the_return(self):
+		cogs = make_account("COGS", root_type="Expense", account_type="Cost of Goods Sold")
+		received = make_account("Received", root_type="Liability")
+		set_inventory_accounts(make_account("Stock", account_type="Stock").name, received.name, cogs.name)
+		item = make_item(make_account("Income", root_type="Income").name, received.name, is_stock_item=1).name
+		shop = make_warehouse("Shop").name
+		now = now_datetime()
+		seed_stock(item, quantity=5, rate=10, date=add_to_date(now, hours=-4))
+		transfer = _move_to(item, shop, 3, add_to_date(now, hours=-3))
+		shipment = _ship(item, shop, 3, add_to_date(now, hours=-2))
+		returned = _ship(item, shop, -3, add_to_date(now, hours=-1), return_against=shipment)
+		self.assertEqual([account_balance(shipment, cogs.name), stock_value_change(returned)], [30, 30])
+
+		receipt = make_receipt(item, quantity=3, rate=20, date=add_to_date(now, hours=-5))
+
+		# The transfer now moves the receipt's stock at 20, which the shop ships and takes back.
+		self.assertEqual(ledger_entries(transfer.doctype, transfer.name), [])
+		self.assertEqual(account_balance(shipment, cogs.name), 60)
+		self.assertEqual([stock_value_change(returned), account_balance(returned, cogs.name)], [60, -60])
+
+		receipt.cancel()
+
+		self.assertEqual(ledger_entries(transfer.doctype, transfer.name), [])
+		self.assertEqual(account_balance(shipment, cogs.name), 30)
+		self.assertEqual([stock_value_change(returned), account_balance(returned, cogs.name)], [30, -30])
+
+
+def _move_to(item, warehouse, quantity, date):
+	row = {
+		"item_code": item,
+		"s_warehouse": "Stores",
+		"t_warehouse": warehouse,
+		"qty": quantity,
+		"basic_rate": 1,
+	}
+	movement = frappe.get_doc(
+		{**movement_values("Material Transfer", [row]), **posting_values(date)}
+	).insert()
+	movement.submit()
+	return movement
+
+
+def _ship(item, warehouse, quantity, date, return_against=None):
+	party = return_against.party if return_against else None
+	party = party or make_customer(make_account("Receivable", account_type="Receivable").name).name
+	shipment = frappe.get_doc(
+		{
+			"doctype": "Books Delivery Note",
+			"customer": party,
+			**posting_values(date),
+			"return_against": return_against and return_against.name,
+			"items": [{"item_code": item, "warehouse": warehouse, "qty": quantity, "rate": 25}],
+		}
+	).insert()
+	shipment.submit()
+	return shipment

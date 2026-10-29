@@ -1,0 +1,182 @@
+<template>
+  <FrappeBottomSheet
+    :open="open"
+    :title="t`Cart`"
+    @update:open="(value: boolean) => $emit('update:open', value)"
+  >
+    <div class="flex flex-col px-4">
+      <div class="pb-3">
+        <MultiLabelLink
+          v-if="sinvDoc.fieldMap"
+          class="w-full"
+          secondary-link="mobile_no"
+          :border="true"
+          :value="sinvDoc.customer"
+          :df="sinvDoc.fieldMap.customer"
+          :show-clear-button="true"
+          :read-only="sinvDoc.isSubmitted"
+          @change="(customer: string) => $emit('setCustomer', customer)"
+        />
+      </div>
+
+      <!-- Rows hold a stepper, so a stretched button under it opens the row. -->
+      <FrappeList
+        class="-mx-4 list-row-px-4"
+        :columns="['minmax(0,1fr)', 'auto']"
+      >
+        <FrappeListRow
+          v-for="row in sinvDoc.items ?? []"
+          :key="row.name"
+          class="py-2.5"
+        >
+          <FrappeListCell>
+            <button
+              type="button"
+              class="absolute inset-0"
+              :aria-label="row.item_name || row.item_code"
+              :disabled="!!row.is_free_item || sinvDoc.isSubmitted"
+              @click="$emit('edit', row)"
+            />
+            <div class="min-w-0">
+              <div class="truncate text-lg text-ink-gray-8">
+                {{ row.item_name || row.item_code }}
+              </div>
+              <div class="mt-0.5 truncate text-md tabular-nums text-ink-gray-5">
+                {{ getRowMeta(row) }}
+              </div>
+            </div>
+          </FrappeListCell>
+          <FrappeListCell class="justify-end">
+            <NumberStepper
+              v-if="!row.is_free_item && !sinvDoc.isSubmitted"
+              class="relative w-44"
+              removable
+              :min="1"
+              :value="getCartRowQuantity(row)"
+              :df="{
+                fieldname: 'qty',
+                fieldtype: 'Float',
+                label: t`Quantity of ${row.item_name || row.item_code || ''}`,
+              }"
+              @change="(quantity: number) => setQuantity(row, quantity)"
+              @remove="row.parentdoc?.remove('items', row.idx as number)"
+            />
+            <span v-else class="text-lg tabular-nums text-ink-gray-7">
+              {{ getCartRowQuantity(row) }}
+            </span>
+          </FrappeListCell>
+        </FrappeListRow>
+      </FrappeList>
+
+      <dl
+        class="-mx-4 flex flex-col gap-2 border-t border-outline-gray-1 px-4 py-3 text-md tabular-nums"
+      >
+        <div
+          v-for="total in totals"
+          :key="total.label"
+          class="flex justify-between gap-4"
+          :class="
+            total.strong ? 'text-md-semibold text-ink-gray-8' : 'text-ink-gray-7'
+          "
+        >
+          <dt>{{ total.label }}</dt>
+          <dd dir="ltr">{{ fyo.format(total.value, 'Currency') }}</dd>
+        </div>
+      </dl>
+
+      <MobileSheetFooter>
+        <FrappeButton
+          v-if="!sinvDoc.isSubmitted"
+          class="flex-1"
+          size="lg"
+          :label="t`Hold`"
+          @click="$emit('hold')"
+        />
+        <FrappeButton
+          class="flex-[2]"
+          size="lg"
+          variant="solid"
+          :disabled="disablePay"
+          :label="payLabel"
+          @click="$emit('pay')"
+        />
+      </MobileSheetFooter>
+    </div>
+  </FrappeBottomSheet>
+</template>
+
+<script setup lang="ts">
+import { t } from 'fyo';
+import {
+  BottomSheet as FrappeBottomSheet,
+  Button as FrappeButton,
+} from 'frappe-ui';
+import {
+  List as FrappeList,
+  ListCell as FrappeListCell,
+  ListRow as FrappeListRow,
+} from 'frappe-ui/list';
+import type { SalesInvoiceItem } from 'models/invoices/InvoiceItem';
+import type { SalesInvoice } from 'models/invoices/SalesInvoice';
+import MultiLabelLink from 'src/components/Controls/MultiLabelLink.vue';
+import NumberStepper from 'src/components/POS/NumberStepper.vue';
+import { POS_ITEM_TOAST_ID } from 'src/components/POS/types';
+import { fyo } from 'src/initFyo';
+import MobileSheetFooter from 'src/mobile/MobileSheetFooter.vue';
+import { showToast } from 'src/utils/interactive';
+import {
+  CostLine,
+  getCostLines,
+  getAmountToPay,
+  getPayableTotal,
+  getRowPricingRule,
+} from 'src/utils/pos';
+import { getCartRowQuantity, setCartQuantity } from 'src/utils/posCart';
+import { computed, inject, type Ref } from 'vue';
+
+/** The cart sheet: customer, lines with quantity steppers, totals, Hold and Pay; a submitted sale only pays. */
+defineProps<{ open: boolean; disablePay: boolean }>();
+
+defineEmits<{
+  'update:open': [open: boolean];
+  setCustomer: [customer: string];
+  edit: [row: SalesInvoiceItem];
+  hold: [];
+  pay: [];
+}>();
+
+const sinvDoc = inject('sinvDoc') as Ref<SalesInvoice>;
+
+const totals = computed<(CostLine & { strong?: boolean })[]>(() => [
+  ...getCostLines(sinvDoc.value),
+  {
+    label: t`Grand Total`,
+    value: getPayableTotal(sinvDoc.value),
+    strong: true,
+  },
+]);
+
+const payLabel = computed(() => {
+  const amount = fyo.format(getAmountToPay(sinvDoc.value), 'Currency');
+  return sinvDoc.value.isReturn ? t`Refund ${amount}` : t`Pay ${amount}`;
+});
+
+function getRowMeta(row: SalesInvoiceItem): string {
+  const rate = fyo.format(row.price_list_rate ?? 0, 'Currency');
+  return [rate, row.item_tax_template, getRowPricingRule(row)]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+async function setQuantity(row: SalesInvoiceItem, quantity: number) {
+  try {
+    await setCartQuantity(row, quantity);
+  } catch (error) {
+    showToast({
+      id: POS_ITEM_TOAST_ID,
+      type: 'error',
+      message: t`${error as string}`,
+    });
+  }
+}
+</script>

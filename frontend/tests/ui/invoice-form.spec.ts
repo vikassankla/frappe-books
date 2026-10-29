@@ -1,0 +1,252 @@
+import { expect, test, type Page } from '@playwright/test';
+import { updateSingle } from './helpers/records';
+import { useBooksSession, waitForBooks } from './helpers/session';
+
+// Frappe serves invoices and quotes directly; the forms still look and behave as before.
+useBooksSession('/books/list/SalesInvoice');
+
+test('a new sales invoice takes its account, rows and totals from the server', async ({
+  page,
+}) => {
+  const { customer, item } = await insertCustomerAndItem(page);
+  await page.getByRole('button', { name: 'New', exact: true }).click();
+  await expect(page).toHaveURL(
+    /\/books\/edit\/SalesInvoice\/New%20Sales%20Invoice/
+  );
+  // The server fills the number series of a new invoice.
+  await expect(
+    page.getByRole('combobox', { name: 'Number Series' })
+  ).toHaveValue('SINV-');
+
+  await pickLink(page, 'Customer', customer);
+  await expect(page.getByRole('combobox', { name: 'Debit To' })).toHaveValue(
+    'Debtors'
+  );
+
+  await page.getByText('Add row', { exact: true }).first().click();
+  await pickLink(page, 'Item', item);
+  // The first data row, after the header; Quantity is its first number.
+  const qty = page.getByRole('row').nth(1).getByRole('textbox').first();
+  await qty.fill('3');
+  await page.keyboard.press('Tab');
+  // The totals block shows what the server calculated.
+  await expect(page.locator('[data-fieldname="net_total"]')).toContainText(
+    '₹ 150.00'
+  );
+
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.getByRole('button', { name: 'Yes', exact: true }).click();
+  await expect(page).toHaveURL(/\/books\/edit\/SalesInvoice\/SINV-\d+$/);
+  await expect(page.getByText(/SINV-\d+ saved/)).toBeVisible();
+});
+
+test('a return takes back what its invoice sold', async ({ page }) => {
+  await updateSingle(page, 'Books Accounting Settings', {
+    enable_invoice_returns: 1,
+  });
+  const name = await insertSubmittedInvoice(page);
+  await page.goto(`/books/edit/SalesInvoice/${name}`);
+  await waitForBooks(page);
+
+  await page.getByRole('button', { name: 'Create' }).click();
+  await page.getByRole('menuitem', { name: 'Return' }).click();
+  await expect(
+    page.getByRole('combobox', { name: 'Return Against' })
+  ).toHaveValue(name);
+
+  const qty = page.getByRole('row').nth(1).getByRole('textbox').first();
+  await expect(qty).toHaveValue('-2.000');
+  // Returns take quantities back, however they are typed.
+  await qty.fill('1');
+  await page.keyboard.press('Tab');
+  await expect(qty).toHaveValue('-1.000');
+});
+
+test('a submitted quote makes an invoice with its rows', async ({ page }) => {
+  const { customer, item } = await insertCustomerAndItem(page);
+  const quote = await insertDocument(page, 'Books Quotation', {
+    quotation_to: 'Books Customer',
+    party_name: customer,
+    items: [{ item_code: item, qty: 4 }],
+  });
+  await runMethod(page, 'Books Quotation', quote, 'submit');
+  await page.goto(`/books/edit/Quotation/${quote}`);
+  await waitForBooks(page);
+
+  await page.getByRole('button', { name: 'Create' }).click();
+  await page.getByRole('menuitem', { name: 'Sales Invoice' }).click();
+  await expect(page).toHaveURL(/\/books\/edit\/SalesInvoice\/New/);
+  // The invoice bills the quote's customer and rows.
+  await expect(page.getByRole('combobox', { name: 'Customer' })).toHaveValue(
+    customer
+  );
+  const qty = page.getByRole('row').nth(1).getByRole('textbox').first();
+  await expect(qty).toHaveValue('4.000');
+});
+
+test('the barcode field marks itself with a leading icon, not a trailing control', async ({
+  page,
+}) => {
+  await page.route(
+    '**/api/v2/document/Books%20Inventory%20Settings/**',
+    async (route) => {
+      const json = await (await route.fetch()).json();
+      json.data.show_barcode_field = 1;
+      await route.fulfill({ json });
+    }
+  );
+  await page.goto(`/books/edit/SalesInvoice/new-barcode-${Date.now()}`);
+  await waitForBooks(page);
+
+  const barcode = page.getByRole('textbox', { name: 'Barcode' });
+  const icon = page.locator('.lucide-scan-line');
+  const field = (await barcode.boundingBox())!;
+  const mark = (await icon.boundingBox())!;
+  expect(mark.x + mark.width).toBeLessThan(field.x + field.width / 2);
+  await expect(page.getByRole('button', { name: 'Scan barcode' })).toHaveCount(
+    0
+  );
+});
+
+test('the form tabs sit above the fields', async ({ page }) => {
+  await page.goto(`/books/edit/SalesInvoice/new-tabs-${Date.now()}`);
+  await waitForBooks(page);
+  const series = page.getByRole('combobox', { name: 'Number Series' });
+  const settings = page.getByRole('radio', { name: 'Settings', exact: true });
+  await expect(series).toBeVisible();
+  const [tab, field] = await Promise.all([
+    settings.boundingBox(),
+    series.boundingBox(),
+  ]);
+  expect(tab!.y).toBeLessThan(field!.y);
+
+  await settings.click();
+  await expect(
+    page.getByText('Apply Discount After Tax', { exact: true })
+  ).toBeVisible();
+  await expect(series).toBeHidden();
+});
+
+test('the actions menu holds the width toggle', async ({ page }) => {
+  await page.goto(`/books/edit/SalesInvoice/new-menu-${Date.now()}`);
+  await waitForBooks(page);
+  await page.getByRole('button', { name: 'Actions', exact: true }).click();
+  await expect(
+    page.getByRole('menuitem', { name: /^(Full|Form) width$/ })
+  ).toBeVisible();
+});
+
+test.describe('on a phone', () => {
+  test.use({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+
+  test('an invoice shows its rows and totals', async ({ page }) => {
+    const name = await insertSubmittedInvoice(page);
+    await page.goto(`/books/edit/SalesInvoice/${name}`);
+    await waitForBooks(page);
+
+    await expect(page.getByText('2 × ₹ 50.00')).toBeVisible();
+    await expect(page.getByText('Receive payment')).toBeVisible();
+  });
+
+  test('a payment submits from its sheet', async ({ page }) => {
+    const name = await insertSubmittedInvoice(page);
+    await page.goto(`/books/edit/SalesInvoice/${name}`);
+    await waitForBooks(page);
+
+    await page.getByRole('button', { name: 'Receive payment' }).click();
+    const sheet = page.getByRole('dialog', { name: 'New Payment Entry' });
+    await sheet.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.getByRole('button', { name: 'Submit', exact: true }).click();
+    // The confirmation opens over the payment sheet, not behind it.
+    await page.getByRole('button', { name: 'Yes', exact: true }).click();
+
+    await expect(page.getByText('Paid', { exact: true })).toBeVisible();
+  });
+});
+
+async function pickLink(page: Page, label: string, value: string) {
+  // Item, not Item Tax Template.
+  const name = new RegExp(`^${label}(?! Tax)`);
+  const input = page.getByRole('combobox', { name }).last();
+  await input.click();
+  await input.fill(value.slice(0, 6));
+  await page.getByRole('option', { name: value }).click();
+}
+
+async function insertCustomerAndItem(page: Page) {
+  const stamp = Date.now();
+  const customer = await insertDocument(page, 'Books Customer', {
+    customer_name: `Invoice Customer ${stamp}`,
+    accounts: [{ account: 'Debtors' }],
+  });
+  const item = await insertDocument(page, 'Books Item', {
+    item_code: `Invoice Item ${stamp}`,
+    standard_rate: 50,
+  });
+  return { customer, item };
+}
+
+async function insertSubmittedInvoice(page: Page): Promise<string> {
+  const { customer, item } = await insertCustomerAndItem(page);
+  const name = await insertDocument(page, 'Books Sales Invoice', {
+    customer,
+    make_auto_payment: 0,
+    make_auto_stock_transfer: 0,
+    items: [{ item_code: item, qty: 2 }],
+  });
+  await runMethod(page, 'Books Sales Invoice', name, 'submit');
+  return name;
+}
+
+async function insertDocument(
+  page: Page,
+  doctype: string,
+  values: Record<string, unknown>
+): Promise<string> {
+  const { status, name } = await page.evaluate(
+    async ({ doctype, values }) => {
+      const response = await fetch(`/api/v2/document/${doctype}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Frappe-CSRF-Token': (window as any).csrf_token,
+        },
+        body: JSON.stringify(values),
+      });
+      const body = await response.json();
+      return { status: response.status, name: body.data?.name as string };
+    },
+    { doctype, values }
+  );
+  expect(status).toBe(200);
+  return name;
+}
+
+async function runMethod(
+  page: Page,
+  doctype: string,
+  name: string,
+  method: string
+) {
+  const status = await page.evaluate(
+    async ({ doctype, name, method }) => {
+      const response = await fetch(
+        `/api/v2/document/${doctype}/${name}/method/${method}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Frappe-CSRF-Token': (window as any).csrf_token,
+          },
+        }
+      );
+      return response.status;
+    },
+    { doctype, name, method }
+  );
+  expect(status).toBe(200);
+}

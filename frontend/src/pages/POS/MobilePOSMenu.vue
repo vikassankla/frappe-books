@@ -1,0 +1,143 @@
+<template>
+  <FrappeDropdown v-model:open="open" :options="options" align="end">
+    <FrappeButton
+      variant="ghost"
+      size="md"
+      icon="lucide-ellipsis"
+      :label="t`POS actions`"
+    />
+    <template #item-suffix="{ item }">
+      <span v-if="item.count" class="text-sm tabular-nums text-ink-gray-5">
+        {{ item.count }}
+      </span>
+    </template>
+  </FrappeDropdown>
+</template>
+
+<script setup lang="ts">
+import { t } from 'fyo';
+import {
+  Button as FrappeButton,
+  Dropdown as FrappeDropdown,
+  type DropdownOptions,
+} from 'frappe-ui';
+import type { SalesInvoice } from 'models/invoices/SalesInvoice';
+import { ModalName } from 'src/components/POS/types';
+import { getCount, type Filter } from 'src/frappe/api';
+import { toActiveDoctype } from 'src/frappe/mode';
+import { fyo } from 'src/initFyo';
+import { getProfileFilters } from 'src/utils/pos';
+import {
+  isCouponOffered,
+  isLoyaltyOffered,
+  isPriceListOffered,
+} from 'src/utils/posDiscounts';
+import { computed, inject, ref, watch, type Ref } from 'vue';
+
+type MenuAction = {
+  name: ModalName;
+  label: string;
+  icon: string;
+  count?: number;
+  hidden?: boolean;
+};
+
+/** The phone POS ⋯ menu: the desktop quick actions and held invoices. */
+const props = defineProps<{
+  enableReturns: boolean;
+  appliedCouponsCount: number;
+}>();
+
+const emit = defineEmits<{ select: [name: ModalName] }>();
+const open = defineModel<boolean>('open', { required: true });
+
+const sinvDoc = inject('sinvDoc') as Ref<SalesInvoice>;
+const savedCount = ref(0);
+
+watch(open, async (isOpen) => {
+  if (isOpen) {
+    const filters = [
+      ['is_pos', '=', 1],
+      ['docstatus', '=', 0],
+      ...getProfileFilters(sinvDoc.value),
+    ] as Filter[];
+    savedCount.value = await getCount(
+      toActiveDoctype('Books Sales Invoice'),
+      filters,
+      []
+    );
+  }
+});
+
+const actions = computed(() => {
+  const all: MenuAction[] = [
+    {
+      name: 'SavedInvoice',
+      label: t`Saved and submitted invoices`,
+      icon: 'lucide-receipt-text',
+      count: savedCount.value,
+    },
+    {
+      name: 'ReturnSalesInvoice',
+      label: t`Return Sales Invoice`,
+      icon: 'lucide-undo-2',
+      hidden: !props.enableReturns,
+    },
+    {
+      name: 'LoyaltyProgram',
+      label: t`Loyalty Program`,
+      icon: 'lucide-gift',
+      hidden: !isLoyaltyOffered(sinvDoc.value),
+    },
+    {
+      name: 'CouponCode',
+      label: t`Coupon code`,
+      icon: 'lucide-ticket-percent',
+      count: props.appliedCouponsCount,
+      hidden: !isCouponOffered(sinvDoc.value),
+    },
+    {
+      name: 'PriceList',
+      label: t`Price List`,
+      icon: 'lucide-tags',
+      hidden: !isPriceListOffered(sinvDoc.value),
+    },
+    {
+      name: 'ItemEnquiry',
+      label: t`Item enquiry`,
+      icon: 'lucide-package-search',
+      hidden: !fyo.isFeatureOn('enable_item_enquiry'),
+    },
+  ];
+  return all.filter(({ hidden }) => !hidden);
+});
+
+const options = computed<DropdownOptions>(() => {
+  const toOption = ({ name, label, icon, count }: MenuAction) => ({
+    label,
+    icon,
+    count,
+    onClick: () => emit('select', name),
+  });
+  const shiftClose: MenuAction = {
+    name: 'ShiftClose',
+    label: t`Close POS shift`,
+    icon: 'lucide-log-out',
+  };
+
+  return [
+    {
+      key: 'actions',
+      group: '',
+      hideLabel: true,
+      options: actions.value.map(toOption),
+    },
+    {
+      key: 'shift',
+      group: '',
+      hideLabel: true,
+      options: [toOption(shiftClose)],
+    },
+  ];
+});
+</script>

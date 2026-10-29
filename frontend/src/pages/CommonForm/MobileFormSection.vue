@@ -1,0 +1,307 @@
+<template>
+  <section v-if="fields.length" class="border-b border-outline-gray-1">
+    <!-- The press state is inset, as on nav sheet rows, so it keeps clear of the fields. -->
+    <div v-if="kind === 'collapsible'" class="px-2 py-1">
+      <button
+        class="flex h-11 w-full items-center gap-2 rounded-4 px-2 text-start text-lg-semibold text-ink-gray-8 active:bg-surface-gray-2"
+        :aria-expanded="isOpen"
+        @click="isOpen = !isOpen"
+      >
+        <span class="min-w-0 flex-1 truncate">{{ title }}</span>
+        <FrappeBadge
+          v-if="requiredCount"
+          theme="red"
+          :label="t`${requiredCount} required`"
+        />
+        <span
+          v-else-if="summary"
+          class="text-base font-normal text-ink-gray-5"
+          >{{ summary }}</span
+        >
+        <span
+          v-if="hasError && !requiredCount"
+          class="size-1.5 rounded-full bg-surface-red-7"
+          :aria-label="t`Has errors`"
+        />
+        <span
+          class="lucide-chevron-down size-4 text-ink-gray-5 transition-transform"
+          :class="isOpen ? 'rotate-180' : ''"
+          aria-hidden="true"
+        />
+      </button>
+    </div>
+    <p
+      v-if="description && (kind !== 'collapsible' || isOpen)"
+      class="px-4 pt-2 text-p-sm text-ink-gray-5"
+      :class="{ 'pb-2': kind === 'collapsible' }"
+    >
+      {{ description }}
+    </p>
+    <template v-for="block in blocks" :key="block.key">
+      <div
+        v-if="block.table && (kind !== 'collapsible' || isOpen)"
+        class="flex flex-col gap-3 p-4"
+      >
+        <slot v-if="block.table === tableField" name="table" />
+        <Table
+          :data-fieldname="block.table.fieldname"
+          :df="block.table"
+          :value="(doc[block.table.fieldname] ?? []) as FrappeDoc[]"
+          :title="block.table === tableField ? tableTitle : block.table.label"
+          @editrow="(row: FrappeDoc) => $emit('editrow', row)"
+          @change="
+            (value: DocValue) => $emit('value-change', block.table!, value)
+          "
+          @row-change="
+            (field: Field, value: DocValue, parentfield: Field) =>
+              $emit('row-change', field, value, parentfield)
+          "
+        />
+        <FrappeErrorMessage :message="errors[block.table.fieldname]" />
+      </div>
+      <div
+        v-else-if="block.groups.length && (kind !== 'collapsible' || isOpen)"
+        class="flex flex-col"
+        :class="getListClass(block)"
+      >
+        <template v-for="group in block.groups" :key="group[0].fieldname">
+          <div v-if="group.length > 1" class="grid grid-cols-2 gap-3">
+            <MobileFormField
+              v-for="field of group"
+              :key="field.fieldname"
+              :field="field"
+              :doc="doc"
+              :error="errors[field.fieldname]"
+              @change="(value: DocValue) => $emit('value-change', field, value)"
+            />
+          </div>
+          <template v-else-if="isTotal(group[0])">
+            <div
+              v-for="line in getTotalLines(group[0])"
+              :key="line.label"
+              class="flex justify-between gap-3"
+              :class="
+                line.emphasis
+                  ? 'border-t border-outline-gray-1 pt-2.5 text-md-semibold text-ink-gray-8 first:border-t-0 first:pt-0'
+                  : 'text-ink-gray-7'
+              "
+              :data-fieldname="group[0].fieldname"
+            >
+              <span class="min-w-0 truncate">{{ line.label }}</span>
+              <span class="tabular-nums" dir="ltr">{{ line.value }}</span>
+            </div>
+          </template>
+          <MobileFormField
+            v-else
+            :field="group[0]"
+            :doc="doc"
+            :error="errors[group[0].fieldname]"
+            @change="
+              (value: DocValue) => $emit('value-change', group[0], value)
+            "
+          />
+        </template>
+        <slot
+          v-if="block.key === 'fields' || block.key === 'after'"
+          name="end"
+        />
+      </div>
+    </template>
+  </section>
+</template>
+<script setup lang="ts">
+import {
+  Badge as FrappeBadge,
+  ErrorMessage as FrappeErrorMessage,
+} from 'frappe-ui';
+import { t } from 'fyo';
+import { DocValue } from 'fyo/core/types';
+import type { FrappeDoc } from 'src/frappe/document';
+import { Field, FieldTypeEnum } from 'schemas/types';
+import { getRowSummary } from 'src/components/Controls/rowSummary';
+import { isCalculating } from 'src/frappe/calculated';
+import Table from 'src/components/Controls/Table.vue';
+import { getFields, getSchema } from 'src/frappe/registry';
+import { fyo } from 'src/initFyo';
+import { isNumeric } from 'src/utils';
+import { hasFieldValue } from 'src/utils/doc';
+import { computed, ref, watch } from 'vue';
+import MobileFormField from './MobileFormField.vue';
+
+const props = defineProps<{
+  title: string;
+  description?: string;
+  fields: Field[];
+  doc: FrappeDoc;
+  errors: Record<string, string>;
+  /** Always a collapsible section, like accessory mode's More details and end tabs. */
+  collapsible?: boolean;
+  /** What a collapsible header says beside its title, e.g. its field count. */
+  summary?: string;
+  /** Empty mandatory fields, which a collapsible header counts in red instead. */
+  requiredCount?: number;
+  /** Whether a collapsible section starts open; by default, when it holds a value. */
+  open?: boolean;
+}>();
+
+defineEmits<{
+  'value-change': [field: Field, value: DocValue];
+  'row-change': [field: Field, value: DocValue, parentfield: Field];
+  editrow: [row: FrappeDoc];
+}>();
+
+const dateTypes: string[] = [FieldTypeEnum.Date, FieldTypeEnum.Datetime];
+
+// Line tables (items) show as rows; read-only summary tables (taxes) as totals.
+const tableField = computed(() => props.fields.find(isLineTable));
+const kind = computed(() => {
+  if (props.collapsible) {
+    return 'collapsible';
+  }
+
+  if (tableField.value) {
+    return 'table';
+  }
+
+  if (props.title === 'Default') {
+    return 'plain';
+  }
+
+  return props.fields.every(isTotal) ? 'totals' : 'collapsible';
+});
+
+const hasError = computed(() =>
+  props.fields.some((field) => props.errors[field.fieldname])
+);
+
+// Collapsed sections open when they hold a value or an error.
+const isOpen = ref(
+  props.open ?? props.fields.some((field) => hasFieldValue(props.doc, field))
+);
+watch(hasError, (value) => value && (isOpen.value = true), { immediate: true });
+
+interface FieldBlock {
+  /** `before` the first table, `after` a table, or `fields` in a section without tables. */
+  key: string;
+  groups: Field[][];
+  table?: Field;
+}
+
+/** Fields keep their schema order around the tables, e.g. two of an ERPNext section. */
+const blocks = computed<FieldBlock[]>(() => {
+  const blocks: FieldBlock[] = [];
+  let fields: Field[] = [];
+  const close = (key: string) =>
+    blocks.push({ key, groups: groupFields(fields) });
+  for (const field of props.fields) {
+    if (isLineTable(field)) {
+      close(blocks.length ? `after-${blocks.length}` : 'before');
+      blocks.push({
+        key: `table-${field.fieldname}`,
+        groups: [],
+        table: field,
+      });
+      fields = [];
+    } else {
+      fields.push(field);
+    }
+  }
+
+  close(blocks.length ? 'after' : 'fields');
+  return blocks;
+});
+
+const tableTitle = computed(() =>
+  props.title === 'Default' ? tableField.value?.label : props.title
+);
+
+/** Consecutive date fields, and the schema's field pairs, sit two to a row. */
+function groupFields(fields: Field[]): Field[][] {
+  const groups: Field[][] = [];
+  for (const field of fields) {
+    const previous = groups.at(-1);
+    if (previous?.length === 1 && isPaired(previous[0], field)) {
+      previous.push(field);
+    } else {
+      groups.push([field]);
+    }
+  }
+
+  return groups;
+}
+
+function isPaired(first: Field, second: Field): boolean {
+  const pairs = props.doc.schema.mobileFieldPairs ?? [];
+  if (
+    pairs.some(([a, b]) => a === first.fieldname && b === second.fieldname)
+  ) {
+    return true;
+  }
+
+  return (
+    dateTypes.includes(first.fieldtype) && dateTypes.includes(second.fieldtype)
+  );
+}
+
+function getListClass(block: FieldBlock) {
+  if (kind.value === 'collapsible') {
+    return 'gap-4 px-4 pb-4 pt-2';
+  }
+
+  const onlyTotals = block.groups.flat().every(isTotal);
+  return [
+    'p-4',
+    onlyTotals ? 'gap-2.5 text-md tabular-nums' : 'gap-4',
+    { 'border-t border-outline-gray-1': block.key.startsWith('after') },
+  ];
+}
+
+// A Table MultiSelect is a field, not a table of rows.
+function isTable(field: Field) {
+  return field.fieldtype === FieldTypeEnum.Table && !field.control;
+}
+
+function isLineTable(field: Field) {
+  return isTable(field) && !field.readOnly;
+}
+
+function isTotal(field: Field) {
+  if (isTable(field)) {
+    return !!field.readOnly;
+  }
+
+  // A Percent reads as a value under its label, not as an amount.
+  return (
+    isNumeric(field) &&
+    !field.control &&
+    props.doc.getFieldState(field).readOnly
+  );
+}
+
+function getTotalLines(field: Field) {
+  const emphasis =
+    kind.value === 'totals' &&
+    field ===
+      props.fields
+        .filter((f) => f.fieldtype === FieldTypeEnum.Currency)
+        .at(-1);
+
+  if (field.fieldtype !== FieldTypeEnum.Table) {
+    const value = isCalculating(props.doc, field)
+      ? t`Calculating…`
+      : fyo.format(props.doc.get(field.fieldname), field, props.doc);
+    return [{ label: field.label ?? field.fieldname, value, emphasis }];
+  }
+
+  const target = (field as { target?: string }).target ?? '';
+  const columns = getFields(target, getSchema(target)?.tableFields ?? []);
+  return (props.doc.get(field.fieldname) as FrappeDoc[]).map((row) => {
+    const { title, meta, amount } = getRowSummary(row, columns);
+    return {
+      label: [title, meta].filter(Boolean).join(' '),
+      value: amount,
+      emphasis: false,
+    };
+  });
+}
+</script>

@@ -1,0 +1,216 @@
+<template>
+  <div ref="mobileSettings" class="flex min-h-full flex-col pb-10">
+    <PageHeader :title="t`Settings`" />
+    <div
+      v-if="tabOptions.length > 1"
+      ref="mobileTabs"
+      class="sticky top-0 z-10 flex shrink-0 items-center overflow-x-auto border-b border-outline-gray-1 bg-surface-base px-4 py-2"
+    >
+      <!-- md is the largest TabButtons size (frappe/frappe-ui#1221). -->
+      <FrappeTabButtons v-model="activeTab" :options="tabOptions" size="md" />
+    </div>
+    <template v-if="doc">
+      <section
+        v-for="[name, fields] in mobileSections"
+        :key="name"
+        class="flex flex-col gap-4 border-b border-outline-gray-1 p-4"
+      >
+        <h2
+          v-if="activeGroup.size > 1 && name !== t`Default`"
+          class="text-lg-semibold text-ink-gray-8"
+        >
+          {{ name }}
+        </h2>
+        <CommonFormSection
+          switches
+          :fields="fields"
+          :doc="doc"
+          :errors="errors"
+          @value-change="
+            (field: Field, value: DocValue) => onValueChange(doc!, field, value)
+          "
+        />
+      </section>
+    </template>
+    <ERPNextSettings v-else-if="erpnextTab && activeTab === erpnextTab.value" />
+    <template v-else-if="posScreenTab && activeTab === posScreenTab.value">
+      <section
+        v-for="group in posScreenGroups"
+        :key="group.title"
+        class="flex flex-col gap-4 border-b border-outline-gray-1 p-4"
+      >
+        <!-- A lone field's own label names it. -->
+        <h2
+          v-if="group.fields.length > 1"
+          class="text-lg-semibold text-ink-gray-8"
+        >
+          {{ group.title }}
+        </h2>
+        <CommonFormSection
+          switches
+          :fields="group.fields"
+          :doc="group.doc"
+          :errors="errors"
+          @value-change="
+            (field: Field, value: DocValue) =>
+              onValueChange(group.doc, field, value)
+          "
+        />
+      </section>
+    </template>
+    <div v-if="showInstallButton" class="p-4">
+      <FrappeButton
+        class="w-full"
+        size="lg"
+        icon-left="lucide-download"
+        :label="t`Install Books`"
+        @click="isInstallSheetOpen = true"
+      />
+    </div>
+    <MobileFooter v-if="canSave">
+      <FrappeButton
+        class="flex-1"
+        size="lg"
+        variant="solid"
+        :label="t`Save`"
+        @click="saveOnPhone"
+      />
+    </MobileFooter>
+  </div>
+</template>
+<script lang="ts">
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { DocValue } from 'fyo/core/types';
+import type { FrappeDoc } from 'src/frappe/document';
+import { ValidationError } from 'fyo/utils/errors';
+import {
+  TabButtons as FrappeTabButtons,
+  Button as FrappeButton,
+  shellScrollContainer,
+} from 'frappe-ui';
+import { ModelNameEnum } from 'models/types';
+import { Field } from 'schemas/types';
+import PageHeader from 'src/components/PageHeader.vue';
+import MobileFooter from 'src/mobile/MobileFooter.vue';
+import { revealActiveTab } from 'src/mobile/revealActiveTab';
+import { docsPathMap } from 'src/utils/misc';
+import { docsPathRef } from 'src/utils/refs';
+import { canInstall, isInstallSheetOpen } from 'src/web/pwa';
+import { computed, defineComponent, nextTick } from 'vue';
+import CommonFormSection from '../CommonForm/CommonFormSection.vue';
+import ERPNextSettings from './ERPNextSettings.vue';
+import { getERPNextTab, getPOSScreenTab, useSettings } from './useSettings';
+
+/** Phones; desktop shows settings in SettingsDialog. */
+export default defineComponent({
+  components: {
+    ERPNextSettings,
+    FrappeButton,
+    CommonFormSection,
+    FrappeTabButtons,
+    MobileFooter,
+    PageHeader,
+  },
+  provide() {
+    // The POS tab's controls edit the POS screen preferences, whose table is of Defaults.
+    const posScreen = () => this.fyo.singles.POSScreenDefaults ?? null;
+    return { doc: computed(() => this.doc ?? posScreen()) };
+  },
+  setup() {
+    return {
+      ...useSettings(),
+      isInstallSheetOpen,
+      erpnextTab: getERPNextTab(),
+      posScreenTab: getPOSScreenTab(),
+    };
+  },
+  data() {
+    return { pickedTab: '' };
+  },
+  computed: {
+    doc(): FrappeDoc | null {
+      return this.fyo.singles[this.activeTab] ?? null;
+    },
+    /** The first tab until the user picks one; accessory mode has no General tab. */
+    activeTab: {
+      get(): string {
+        return this.pickedTab || this.tabOptions[0].value;
+      },
+      set(tab: string) {
+        this.pickedTab = tab;
+      },
+    },
+    tabOptions(): { value: string; label: string }[] {
+      return [...this.tabs, this.posScreenTab, this.erpnextTab]
+        .filter((tab) => !!tab)
+        .map(({ value, label }) => ({ value, label }));
+    },
+    activeGroup(): Map<string, Field[]> {
+      const group = this.groupedFields.get(this.activeTab);
+      if (!group) {
+        throw new ValidationError(
+          `Tab group ${this.activeTab} has no value set`
+        );
+      }
+
+      return group;
+    },
+    showInstallButton(): boolean {
+      return (
+        this.activeTab === ModelNameEnum.SystemSettings && canInstall.value
+      );
+    },
+    mobileSections(): [string, Field[]][] {
+      return [...this.activeGroup.entries()].filter(
+        ([, fields]) => fields.length
+      );
+    },
+  },
+  watch: {
+    async activeTab() {
+      shellScrollContainer.value?.scrollTo({ top: 0 });
+      await nextTick();
+      revealActiveTab(this.$refs.mobileTabs as HTMLElement | undefined);
+    },
+  },
+  activated(): void {
+    const tab = this.$route.query.tab;
+    if (
+      typeof tab === 'string' &&
+      this.tabOptions.some(({ value }) => value === tab)
+    ) {
+      this.activeTab = tab;
+    }
+
+    docsPathRef.value = docsPathMap.Settings ?? '';
+    this.setSaveShortcut();
+  },
+  async deactivated(): Promise<void> {
+    docsPathRef.value = '';
+    this.deleteSaveShortcut();
+    await this.reset();
+  },
+  methods: {
+    /** Scrolls to the first invalid field instead of saving. */
+    async saveOnPhone(): Promise<void> {
+      const field = (
+        this.$refs.mobileSettings as HTMLElement | undefined
+      )?.querySelector('[role="alert"]')?.parentElement;
+      if (!field) {
+        await this.sync();
+        return;
+      }
+
+      // scrollIntoView would also scroll the shell's clipped ancestors.
+      const container = shellScrollContainer.value;
+      const offset =
+        field.getBoundingClientRect().top -
+        (container?.getBoundingClientRect().top ?? 0);
+      container?.scrollBy({
+        top: offset - container.clientHeight / 3,
+        behavior: 'smooth',
+      });
+    },
+  },
+});
+</script>

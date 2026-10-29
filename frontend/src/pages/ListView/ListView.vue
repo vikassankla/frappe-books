@@ -1,0 +1,390 @@
+<template>
+  <div class="flex flex-col" :class="isMobile ? 'min-h-full' : ''">
+    <PageHeader :title="title">
+      <template #mobile>
+        <FrappeButton
+          v-if="canCreate && !isSelectionMode"
+          variant="solid"
+          size="md"
+          icon-left="lucide-plus"
+          :label="t`New`"
+          @click="handleMakeNewDoc"
+        />
+      </template>
+      <template v-if="schemaName === 'Item'">
+        <template v-if="isSelectionMode && selectedItems.length">
+          <span class="self-center text-sm text-ink-gray-6">
+            {{ t`${selectedItems.length} selected` }}
+          </span>
+          <FrappeDropdown :options="actionOptions" align="end">
+            <template #trigger>
+              <FrappeButton>{{ t`Create` }}</FrappeButton>
+            </template>
+          </FrappeDropdown>
+        </template>
+        <FrappeButton
+          :label="isSelectionMode ? t`Done` : t`Select`"
+          :icon-left="isSelectionMode ? 'lucide-check' : 'lucide-list-checks'"
+          @click="toggleSelectionMode"
+        />
+      </template>
+      <FrappeButton
+        v-if="canExport"
+        ref="exportButton"
+        @click="openExportModal = true"
+      >
+        {{ t`Export` }}
+      </FrappeButton>
+      <FilterDropdown ref="filterDropdown" :schema-name="schemaName" @change="applyFilter" />
+      <OpenInERPNextButton :get-url="() => getDeskListUrl(doctype)" />
+      <FrappeButton
+        v-if="canCreate"
+        variant="solid"
+        icon-left="lucide-plus"
+        :label="t`New`"
+        @click="handleMakeNewDoc"
+      />
+    </PageHeader>
+    <MobileListToolbar
+      v-if="isMobile"
+      ref="mobileToolbar"
+      :schema-name="schemaName"
+      :search-fields="searchFields"
+      :search-placeholder="filterBar?.searchPlaceholder"
+      @change="applyFilter"
+    >
+      <FrappeButton
+        v-if="schemaName === 'Item'"
+        size="lg"
+        :label="isSelectionMode ? t`Cancel` : t`Select`"
+        @click="toggleSelectionMode"
+      />
+      <template v-if="filterBar" #below>
+        <ListLinkFilter
+          v-model="linkValue"
+          :schema-name="schemaName"
+          :fieldname="filterBar.linkField"
+          :all-label="filterBar.allLabel"
+          @update:model-value="updateList"
+        />
+      </template>
+    </MobileListToolbar>
+    <div v-else-if="filterBar" class="flex gap-2 px-3 pb-2 pt-3 sm:px-5">
+      <FrappeTextInput
+        type="search"
+        class="w-60"
+        :model-value="search"
+        :placeholder="filterBar.searchPlaceholder"
+        :aria-label="t`Search`"
+        @update:model-value="onSearch"
+      >
+        <template #prefix>
+          <span
+            aria-hidden="true"
+            class="lucide-search size-4 text-ink-gray-5"
+          />
+        </template>
+      </FrappeTextInput>
+      <ListLinkFilter
+        v-model="linkValue"
+        :schema-name="schemaName"
+        :fieldname="filterBar.linkField"
+        :all-label="filterBar.allLabel"
+        @update:model-value="updateList"
+      />
+    </div>
+    <List
+      ref="list"
+      :schema-name="schemaName"
+      :list-config="listConfig"
+      :filters="filters"
+      :can-create="canCreate"
+      :is-selection-mode="isSelectionMode"
+      class="flex-1 flex h-full"
+      @open-doc="openDoc"
+      @updated-data="updatedData"
+      @make-new-doc="makeNewDoc"
+      @clear-filters="clearFilters"
+      @selected-items-changed="selectedItems = $event"
+    />
+    <MobileFooter v-if="isMobile && isSelectionMode" class="items-center">
+      <span class="min-w-0 flex-1 text-base text-ink-gray-7">
+        {{ t`${selectedItems.length} selected` }}
+      </span>
+      <FrappeButton
+        size="lg"
+        variant="solid"
+        :label="t`Create`"
+        :disabled="!selectedItems.length"
+        @click="isCreateSheetOpen = true"
+      />
+    </MobileFooter>
+    <MobileOptionsSheet
+      v-if="isMobile"
+      v-model:open="isCreateSheetOpen"
+      actions
+      :title="t`Create`"
+      :options="createOptions"
+      @select="(value) => createInvoice(String(value))"
+    />
+    <ExportWizard
+      v-model:open="openExportModal"
+      :schema-name="schemaName"
+      :page-title="pageTitle"
+      :list-filters="listFilters"
+    />
+  </div>
+</template>
+<script lang="ts">
+import {
+  Button as FrappeButton,
+  Dropdown as FrappeDropdown,
+  TextInput as FrappeTextInput,
+  type DropdownOptions,
+} from 'frappe-ui';
+import ExportWizard from 'src/components/ExportWizard.vue';
+import FilterDropdown from 'src/components/FilterDropdown.vue';
+import OpenInERPNextButton from 'src/components/OpenInERPNextButton.vue';
+import PageHeader from 'src/components/PageHeader.vue';
+import { getDeskListUrl } from 'src/frappe/desk';
+import { getDocType } from 'src/frappe/doctypes';
+
+import { getField, getModel, getSchema, getSearchFields } from 'src/frappe/registry';
+import { newFrappeDoc } from 'src/frappe/documents';
+import { fyo } from 'src/initFyo';
+import { shortcutsKey } from 'src/utils/injectionKeys';
+import { docsPathMap, getNewDocValues } from 'src/utils/misc';
+import { docsPathRef } from 'src/utils/refs';
+import { getFormRoute, openNewDoc, routeTo } from 'src/utils/ui';
+import { isMobile } from 'src/utils/viewport';
+import type { ListFilterBar } from 'fyo/model/types';
+import type { Filter } from 'src/frappe/api';
+import { defineComponent, inject, ref, type PropType } from 'vue';
+import { getSearchFilters } from 'src/utils/listFilters';
+import List from './List.vue';
+import ListLinkFilter from './ListLinkFilter.vue';
+import { getListColumns } from './listColumns';
+import MobileFooter from 'src/mobile/MobileFooter.vue';
+import MobileOptionsSheet from 'src/mobile/MobileOptionsSheet.vue';
+import MobileListToolbar from './MobileListToolbar.vue';
+import { getMobileRowLayout } from './mobileRowLayout';
+import type { Invoice } from 'models/invoices/Invoice';
+import { ModelNameEnum } from 'models/types';
+
+export default defineComponent({
+  name: 'ListView',
+  components: {
+    OpenInERPNextButton,
+    PageHeader,
+    List,
+    FilterDropdown,
+    FrappeButton,
+    ExportWizard,
+    FrappeDropdown,
+    FrappeTextInput,
+    ListLinkFilter,
+    MobileFooter,
+    MobileListToolbar,
+    MobileOptionsSheet,
+  },
+  props: {
+    schemaName: { type: String, required: true },
+    filters: { type: Array as PropType<Filter[]>, default: () => [] },
+    pageTitle: { type: String, default: '' },
+  },
+  setup() {
+    return {
+      isMobile,
+      shortcuts: inject(shortcutsKey),
+      list: ref<InstanceType<typeof List> | null>(null),
+      exportButton: ref<InstanceType<typeof FrappeButton> | null>(null),
+      filterDropdown: ref<InstanceType<typeof FilterDropdown> | null>(null),
+      mobileToolbar: ref<InstanceType<typeof MobileListToolbar> | null>(null),
+    };
+  },
+  data() {
+    return {
+      listConfig: undefined,
+      openExportModal: false,
+      listFilters: [],
+      isSelectionMode: false,
+      selectedItems: [] as string[],
+      isCreateSheetOpen: false,
+      appliedFilters: [],
+      searchFilters: [],
+      search: '',
+      searchTimer: 0,
+      linkValue: null,
+    } as {
+      listConfig: undefined | ReturnType<typeof getListConfig>;
+      openExportModal: boolean;
+      listFilters: Filter[];
+      isSelectionMode: boolean;
+      selectedItems: string[];
+      isCreateSheetOpen: boolean;
+      appliedFilters: Filter[];
+      searchFilters: Filter[];
+      search: string;
+      searchTimer: number;
+      linkValue: string | null;
+    };
+  },
+  computed: {
+    doctype(): string {
+      return getDocType(this.schemaName).doctype;
+    },
+    context(): string {
+      return 'ListView-' + this.schemaName;
+    },
+    filterBar(): ListFilterBar | undefined {
+      return this.listConfig?.filterBar;
+    },
+    title(): string {
+      if (this.pageTitle) {
+        return this.pageTitle;
+      }
+
+      return getSchema(this.schemaName)?.label ?? this.schemaName;
+    },
+    /** The row title and the schema's search fields, as stored columns. */
+    searchFields(): string[] {
+      const columns = getListColumns(this.schemaName, this.listConfig);
+      const title = getMobileRowLayout(this.schemaName, columns).title.fieldname;
+      const keywords = getSearchFields(this.schemaName);
+      return [...new Set(['name', title, ...keywords])].filter((fieldname) => {
+        const field = getField(this.schemaName, fieldname);
+        return field && !field.computed;
+      });
+    },
+    canExport(): boolean {
+      return fyo.can(this.schemaName, 'export');
+    },
+    canCreate(): boolean {
+      return (
+        getSchema(this.schemaName)?.create !== false &&
+        fyo.can(this.schemaName, 'create')
+      );
+    },
+    /** Documents that can be made from the selected items. */
+    createOptions(): { value: string; label: string }[] {
+      if (this.schemaName !== ModelNameEnum.Item || !this.selectedItems.length) {
+        return [];
+      }
+
+      return [
+        { value: ModelNameEnum.Quotation, label: this.t`Quotation` },
+        { value: ModelNameEnum.SalesInvoice, label: this.t`Sales Invoice` },
+        { value: ModelNameEnum.PurchaseInvoice, label: this.t`Purchase Invoice` },
+      ].filter((option) => fyo.can(option.value, 'create'));
+    },
+    actionOptions(): DropdownOptions {
+      return this.createOptions.map((option) => ({
+        ...option,
+        onClick: () => this.createInvoice(option.value),
+      }));
+    },
+  },
+  activated() {
+    this.listConfig = getListConfig(this.schemaName);
+    docsPathRef.value = docsPathMap[this.schemaName] ?? docsPathMap.Entries ?? '';
+
+    this.setShortcuts();
+  },
+  deactivated() {
+    docsPathRef.value = '';
+    this.shortcuts?.delete(this.context);
+  },
+  methods: {
+    getDeskListUrl,
+    setShortcuts() {
+      if (!this.shortcuts) {
+        return;
+      }
+
+      this.shortcuts.pmod.set(this.context, ['KeyN'], () => this.makeNewDoc());
+      this.shortcuts.pmod.set(this.context, ['KeyE'], () => this.exportButton?.$el.click());
+    },
+    updatedData(listFilters: Filter[]) {
+      this.listFilters = listFilters;
+    },
+    async openDoc(name: string) {
+      const route = getFormRoute(this.schemaName, name);
+      await routeTo(route);
+    },
+    async makeNewDoc() {
+      if (!this.canCreate) {
+        return;
+      }
+
+      const values = getNewDocValues(this.schemaName, this.filters);
+      await openNewDoc(this.schemaName, values);
+    },
+    async handleMakeNewDoc() {
+      await this.makeNewDoc();
+    },
+    /** The filter dropdown's or phone toolbar's filters; the toolbar also sends its search. */
+    applyFilter(filters: Filter[], orFilters?: Filter[]) {
+      this.appliedFilters = filters;
+      if (orFilters) {
+        this.searchFilters = orFilters;
+      }
+      this.updateList();
+    },
+    onSearch(value: string) {
+      this.search = value;
+      window.clearTimeout(this.searchTimer);
+      this.searchTimer = window.setTimeout(() => {
+        this.searchFilters = getSearchFilters(this.searchFields, this.search);
+        this.updateList();
+      }, 300);
+    },
+    updateList() {
+      const field = this.filterBar?.linkField;
+      const linkFilters: Filter[] =
+        field && this.linkValue ? [[field, '=', this.linkValue]] : [];
+      this.list?.updateData(
+        [...this.appliedFilters, ...linkFilters],
+        this.searchFilters
+      );
+    },
+    clearFilters() {
+      this.linkValue = null;
+      this.mobileToolbar?.clear();
+    },
+    toggleSelectionMode() {
+      this.isSelectionMode = !this.isSelectionMode;
+      if (!this.isSelectionMode) {
+        this.selectedItems = [];
+      }
+    },
+    async createInvoice(value: string) {
+      if (
+        value === ModelNameEnum.Quotation ||
+        value === ModelNameEnum.SalesInvoice ||
+        value === ModelNameEnum.PurchaseInvoice
+      ) {
+        // The server prices the rows, as when the items are added in the form.
+        const doc = newFrappeDoc(value) as Invoice;
+        for (const itemName of this.selectedItems) {
+          await doc.addItem(itemName);
+        }
+
+        const route = getFormRoute(value, doc.name!);
+        await routeTo(route);
+        this.selectedItems = [];
+        this.isSelectionMode = false;
+      }
+    },
+  },
+});
+
+function getListConfig(schemaName: string) {
+  const listConfig = getModel(schemaName)?.getListViewSettings?.(fyo);
+  if (listConfig?.columns === undefined) {
+    return {
+      columns: ['name'],
+    };
+  }
+  return listConfig;
+}
+</script>

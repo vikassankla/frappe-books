@@ -1,0 +1,180 @@
+"""Set up a Books company on the current Frappe site."""
+
+import json
+from functools import cache
+
+import frappe
+from frappe.desk.page.setup_wizard.setup_wizard import complete_app_setup
+
+from frappe_books.coa import (
+	ensure_bank_account,
+	ensure_cash_account,
+	ensure_chart,
+	ensure_discount_account,
+	find_ledger_account,
+	load_chart,
+)
+from frappe_books.company import default_company, save_company
+from frappe_books.currency import currency_precision
+from frappe_books.formats import books_date_format
+from frappe_books.regional import ensure_address_template, ensure_regional_records
+from frappe_books.series import NUMBER_SERIES
+from frappe_books.settings import update_frappe_settings
+
+
+def run_setup(wizard):
+	complete_site_setup(wizard)
+	# The records the setup makes belong to the company, so it comes first.
+	save_company({"company_name": wizard.company_name, "email": wizard.email})
+	chart = load_chart(wizard.chart_of_accounts)
+	ensure_chart(chart)
+	ensure_regional_records(wizard.country)
+	ensure_address_template(wizard.country)
+	bank_account = ensure_bank_account(wizard.bank_name, chart, wizard.country)
+	discount_account = ensure_discount_account(chart)
+	enable_currency(wizard.currency)
+	accounts = {**default_accounts(chart), "cash": ensure_cash_account(chart)}
+	_update_company_accounts(discount_account, accounts)
+	_update_accounting_settings(wizard)
+	_update_books_system_settings(wizard)
+	_update_print_settings(wizard)
+	_update_pos_settings(accounts)
+	_update_modes_of_payment(accounts["cash"], bank_account)
+	_update_defaults()
+	return {"setup_complete": True, "bank_account": bank_account}
+
+
+def complete_site_setup(wizard):
+	"""Frappe's setup sets System Settings: country, currency, time zone and formats.
+
+	On a site Frappe has set up already, only the company country and currency change.
+	Either way, the currency precision becomes that of the company currency.
+	"""
+	if not frappe.is_setup_complete():
+		complete_app_setup(country=wizard.country, currency=wizard.currency, timezone=wizard.time_zone)
+	update_frappe_settings(
+		"System Settings",
+		{
+			"country": wizard.country,
+			"currency": wizard.currency,
+			"currency_precision": str(currency_precision(wizard.currency)),
+		},
+	)
+
+
+def enable_currency(currency):
+	"""Frappe offers only enabled currencies in Link searches and in the boot /books formats with."""
+	doc = frappe.get_doc("Currency", currency)
+	if not doc.enabled:
+		doc.enabled = 1
+		# Saving clears the cached boots, so the next page load has the currency.
+		doc.save()
+
+
+def default_accounts(chart):
+	"""Pick the chart's ledger accounts for settings by name first, then by account type."""
+	return {
+		"write_off": find_ledger_account(chart, ["Write Off"]),
+		"round_off": find_ledger_account(chart, ["Rounded Off", "Round Off"]),
+		"receivable": find_ledger_account(chart, ["Debtors"], "Receivable"),
+		"stock_in_hand": find_ledger_account(chart, ["Stock In Hand"], "Stock"),
+		"stock_received_but_not_billed": find_ledger_account(
+			chart, ["Stock Received But Not Billed"], "Stock Received But Not Billed"
+		),
+		"cost_of_goods_sold": find_ledger_account(chart, ["Cost of Goods Sold"], "Cost of Goods Sold"),
+		"stock_adjustment": find_ledger_account(chart, ["Stock Adjustment"], "Stock Adjustment"),
+	}
+
+
+def _update_company_accounts(discount_account, accounts):
+	save_company(
+		{
+			"write_off_account": accounts["write_off"],
+			"round_off_account": accounts["round_off"],
+			"default_discount_account": discount_account,
+			"default_warehouse": "Stores",
+			"default_inventory_account": accounts["stock_in_hand"],
+			"stock_received_but_not_billed": accounts["stock_received_but_not_billed"],
+			"default_expense_account": accounts["cost_of_goods_sold"],
+			"stock_adjustment_account": accounts["stock_adjustment"],
+		}
+	)
+
+
+def _update_accounting_settings(wizard):
+	settings = frappe.get_single("Books Accounting Settings")
+	settings.update(
+		{
+			"fullname": wizard.fullname,
+			"bank_name": wizard.bank_name,
+			"year_start_date": wizard.fiscal_year_start,
+			"year_end_date": wizard.fiscal_year_end,
+			"setup_complete": 1,
+		}
+	)
+	settings.save(ignore_permissions=True)
+
+
+def _update_print_settings(wizard):
+	settings = frappe.get_single("Books Print Settings")
+	settings.update(
+		{
+			"logo": wizard.logo,
+			"company_name": wizard.company_name,
+			"email": wizard.email,
+			"display_logo": bool(wizard.logo),
+		}
+	)
+	settings.save(ignore_permissions=True)
+
+
+@cache
+def get_books_country_info() -> dict:
+	"""The fiscal years and locales Frappe's country data lacks, by Frappe country name."""
+	path = frappe.get_app_path("frappe_books", "data", "country_info.json")
+	with open(path) as file:
+		return json.load(file)
+
+
+def _update_books_system_settings(wizard):
+	"""Format dates and numbers as the company country does, in /books and in Frappe."""
+	settings = frappe.get_single("Books System Settings")
+	settings.locale = get_books_country_info().get(wizard.country, {}).get("locale") or "en-US"
+	if date_format := frappe.db.get_value("Country", wizard.country, "date_format"):
+		settings.date_format = books_date_format(date_format)
+	settings.save(ignore_permissions=True)
+	settings.update_frappe_formats()
+
+
+def _update_pos_settings(accounts):
+	settings = frappe.get_single("Books POS Settings")
+	settings.update(
+		{
+			"warehouse": "Stores",
+			"cash_account": accounts["cash"],
+			"write_off_account": accounts["write_off"],
+			"default_account": accounts["receivable"],
+		}
+	)
+	settings.save(ignore_permissions=True)
+
+
+def _update_modes_of_payment(cash_account, bank_account):
+	"""Receipts by the seeded modes default to the company's cash and bank accounts."""
+	company = default_company()
+	for mode, account in (("Cash", cash_account), ("Bank", bank_account)):
+		doc = frappe.get_doc("Books Mode of Payment", mode)
+		row = doc.get("accounts", {"company": company})
+		row = row[0] if row else doc.append("accounts", {"company": company})
+		row.default_account = account
+		doc.save(ignore_permissions=True)
+
+
+def _update_defaults():
+	"""Set the default number series.
+
+	Payment accounts and stock locations stay empty, so invoices do not pay or move stock on submit unasked.
+	"""
+	defaults = frappe.get_single("Books Defaults")
+	defaults.update({field: prefix for prefix, _type, field in NUMBER_SERIES.values() if field})
+	defaults.save(ignore_permissions=True)
